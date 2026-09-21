@@ -1,0 +1,245 @@
+name: Build AirCard V7 Persistent Diagnostic
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply V7 patch
+        shell: bash
+        run: |
+          cat > /tmp/v7.patch <<'PATCH'
+          --- a/ios-app/TendiesEngine.swift
+          +++ b/ios-app/TendiesEngine.swift
+          @@ -270,6 +270,7 @@
+                   let structVersion = (majorVer <= 16) ? 59 : 61
+                   let versionsToWrite: [Int] = [structVersion]
+           
+          +        log("🧪 V7 Diagnostic — write/API verification only; no remote read-back API is available in the current AirCard FFI")
+                   log("🚀 Starting PosterBoard injection into \(normalizedContainer)")
+                   log("ℹ️ Target PosterBoard structure version: \(structVersion) (iOS \(majorVer))")
+           
+          @@ -312,7 +313,8 @@
+                           let randomizedID = Int.random(in: 10000...99999)
+                           log("  [\(descIndex + 1)/\(descriptors.count)] Descriptor \(targetUUID) (ID: \(randomizedID)) for \(descItem.ext)…")
+                           if preservesMercuryDescriptorUUID {
+          -                    log("    ☿ Mercury V5: preserving source descriptor UUID \(sourceDescriptorUUID)")
+          +                    log("    ☿ Mercury V7: preserving source descriptor UUID \(sourceDescriptorUUID)")
+          +                    logMercuryDescriptorDiagnostics(folderURL: descItem.url, log: log)
+                           }
+           
+                           // MercuryPoster descriptors carry semantic identifiers that must remain
+          @@ -327,6 +329,9 @@
+                           for sVer in versionsToWrite {
+                               // Primary destination
+                               let targetParentDir = "\(normalizedContainer)/Library/Application Support/PRBPosterExtensionDataStore/\(sVer)/Extensions/\(descItem.ext)/descriptors"
+          +                    if descItem.ext == "com.apple.MercuryPoster" {
+          +                        log("    🧭 V7 expected remote path: \(targetParentDir)/\(targetUUID)")
+          +                    }
+                               try await injectDescriptorFolder(
+                                   folderURL: descItem.url,
+                                   targetParentDir: targetParentDir,
+          @@ -334,6 +339,10 @@
+                                   pairingPath: pairingPath,
+                                   log: log
+                               )
+          +                    if descItem.ext == "com.apple.MercuryPoster" {
+          +                        log("    ✅ V7 AirLift inject API returned success")
+          +                        log("    ⚠️ V7 NOT read-back verified: success here does not prove PosterBoard indexed the descriptor")
+          +                    }
+           
+                               // On iOS 18+, Collections was migrated to com.apple.Posters.CollectionsPosterApp
+                               if descItem.ext == "com.apple.WallpaperKit.CollectionsPoster" {
+          @@ -546,6 +555,44 @@
+                   }
+               }
+           
+          +    // MARK: - V7 Mercury Diagnostics
+          +
+          +    private func logMercuryDescriptorDiagnostics(
+          +        folderURL: URL,
+          +        log: @escaping (String) -> Void
+          +    ) {
+          +        let fm = FileManager.default
+          +        log("    🔎 V7 Mercury source descriptor: \(folderURL.lastPathComponent)")
+          +
+          +        let identifierURL = folderURL.appendingPathComponent("com.apple.posterkit.provider.descriptor.identifier")
+          +        if let data = try? Data(contentsOf: identifierURL),
+          +           let value = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+          +            log("    🔎 descriptor.identifier = \(value)")
+          +        } else {
+          +            log("    ⚠️ descriptor.identifier could not be read from source archive")
+          +        }
+          +
+          +        let userInfoName = "com.apple.posterkit.provider.contents.userInfo"
+          +        if let enumerator = fm.enumerator(at: folderURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+          +            var files: [String] = []
+          +            while let fileURL = enumerator.nextObject() as? URL {
+          +                let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey])
+          +                guard values?.isRegularFile == true else { continue }
+          +                let rel = fileURL.path.replacingOccurrences(of: folderURL.path + "/", with: "")
+          +                files.append(rel)
+          +                if fileURL.lastPathComponent == userInfoName,
+          +                   let data = try? Data(contentsOf: fileURL),
+          +                   let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] {
+          +                    let look = plist["lookIdentifier"].map { String(describing: $0) } ?? "<missing>"
+          +                    let representing = plist["wallpaperRepresentingIdentifier"].map { String(describing: $0) } ?? "<missing>"
+          +                    log("    🔎 userInfo.lookIdentifier = \(look)")
+          +                    log("    🔎 userInfo.wallpaperRepresentingIdentifier = \(representing)")
+          +                }
+          +            }
+          +            log("    🔎 source payload files (\(files.count)): \(files.sorted().joined(separator: ", "))")
+          +        }
+          +    }
+          +
+               // MARK: - Folder Injector Helper (Single Atomic Move via AirTraffic)
+           
+               private func injectDescriptorFolder(
+          --- a/ios-app/AppViewModel.swift
+          +++ b/ios-app/AppViewModel.swift
+          @@ -75,8 +75,46 @@
+               @Published var tendiesFlashPhase: FlashPhase = .idle
+               @Published var tendiesFlashProgress: Double = 0
+               @Published var tendiesFlashLog: [String] = []
+          +    @Published var lastTendiesDiagnosticLog: [String] = []
+               @Published var isNeoSpringing: Bool = false
+           
+          +    private var tendiesDiagnosticLogURL: URL {
+          +        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+          +            .appendingPathComponent("Last-Flash-Diagnostic.log")
+          +    }
+          +
+          +    private func loadLastTendiesDiagnosticLog() {
+          +        guard let text = try? String(contentsOf: tendiesDiagnosticLogURL, encoding: .utf8) else {
+          +            lastTendiesDiagnosticLog = []
+          +            return
+          +        }
+          +        lastTendiesDiagnosticLog = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
+          +    }
+          +
+          +    private func resetPersistentTendiesDiagnosticLog() {
+          +        lastTendiesDiagnosticLog = []
+          +        try? "".write(to: tendiesDiagnosticLogURL, atomically: true, encoding: .utf8)
+          +    }
+          +
+          +    private func appendPersistentTendiesDiagnosticLog(_ line: String) {
+          +        lastTendiesDiagnosticLog.append(line)
+          +        let entry = line + "\n"
+          +        if let data = entry.data(using: .utf8) {
+          +            if FileManager.default.fileExists(atPath: tendiesDiagnosticLogURL.path),
+          +               let handle = try? FileHandle(forWritingTo: tendiesDiagnosticLogURL) {
+          +                defer { try? handle.close() }
+          +                try? handle.seekToEnd()
+          +                try? handle.write(contentsOf: data)
+          +            } else {
+          +                try? data.write(to: tendiesDiagnosticLogURL, options: .atomic)
+          +            }
+          +        }
+          +    }
+          +
+          +    func clearPersistentTendiesDiagnosticLog() {
+          +        resetPersistentTendiesDiagnosticLog()
+          +    }
+          +
+               // MARK: - AirCard UI States & Properties
+               static var detectedDeviceLanguage: PasscodeLanguageTarget {
+                   let code = Locale.preferredLanguages.first?.components(separatedBy: "-").first?.lowercased() ?? "en"
+          @@ -118,6 +156,7 @@
+                   scanDocumentsDirectory()
+                   posterBoardContainer = UserDefaults.standard.string(forKey: "aircard.posterboard_container") ?? ""
+                   loadSavedTendies()
+          +        loadLastTendiesDiagnosticLog()
+           
+                   // Hook Rust log output into our log array.
+                   AppViewModel.sharedLogSink = { [weak self] line in
+          @@ -1207,6 +1246,8 @@
+                   tendiesFlashPhase = .running
+                   tendiesFlashProgress = 0
+                   tendiesFlashLog = []
+          +        resetPersistentTendiesDiagnosticLog()
+          +        appendPersistentTendiesDiagnosticLog("🧪 V7 Persistent Diagnostic Log")
+           
+                   do {
+                       try await TendiesEngine.shared.flashTendies(
+          @@ -1217,6 +1258,7 @@
+                           log: { [weak self] line in
+                               DispatchQueue.main.async {
+                                   self?.tendiesFlashLog.append(line)
+          +                        self?.appendPersistentTendiesDiagnosticLog(line)
+                               }
+                           },
+                           progress: { [weak self] p in
+          @@ -1228,7 +1270,9 @@
+                       tendiesFlashPhase = .done(ok: true)
+                       tendiesFlashProgress = 1.0
+                       tendiesFlashLog.append("🎉 Wallpapers applied successfully!")
+          +            appendPersistentTendiesDiagnosticLog("🎉 Wallpapers applied successfully!")
+                       tendiesFlashLog.append("⚡ Triggering NeoSpring respring...")
+          +            appendPersistentTendiesDiagnosticLog("⚡ Triggering NeoSpring respring...")
+           
+                       DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                           self?.isNeoSpringing = true
+          @@ -1236,6 +1280,7 @@
+                       }
+                   } catch {
+                       tendiesFlashLog.append("❌ Error: \(error.localizedDescription)")
+          +            appendPersistentTendiesDiagnosticLog("❌ Error: \(error.localizedDescription)")
+                       tendiesFlashPhase = .done(ok: false)
+                   }
+               }
+          --- a/ios-app/TendiesView.swift
+          +++ b/ios-app/TendiesView.swift
+          @@ -186,7 +186,22 @@
+                               Text("Flashing will automatically trigger NeoSpring to respring the device and apply your new wallpapers.")
+                           }
+           
+          -                // Section 5: Flash Log (CompactLogView)
+          +                // Section 5: Persistent diagnostic log survives NeoSpring/app relaunch.
+          +                if !vm.lastTendiesDiagnosticLog.isEmpty {
+          +                    Section {
+          +                        CompactLogView(
+          +                            title: "Last Flash Diagnostic Log (\(vm.lastTendiesDiagnosticLog.count) lines)",
+          +                            lines: vm.lastTendiesDiagnosticLog,
+          +                            onClear: { vm.clearPersistentTendiesDiagnosticLog() }
+          +                        )
+          +                    } header: {
+          +                        Text("V7 Persistent Diagnostic")
+          +                    } footer: {
+          +                        Text("Saved in Documents/Last-Flash-Diagnostic.log and survives NeoSpring.")
+          +                    }
+          +                }
+          +
+          +                // Section 6: Current-session Flash Log (CompactLogView)
+                           if !vm.tendiesFlashLog.isEmpty {
+                               Section {
+                                   CompactLogView(
+          PATCH
+          patch -p1 < /tmp/v7.patch
+
+      - name: Verify patch
+        run: |
+          grep -q "V7 Diagnostic" ios-app/TendiesEngine.swift
+          grep -q "Last-Flash-Diagnostic.log" ios-app/AppViewModel.swift
+          grep -q "Last Flash Diagnostic Log" ios-app/TendiesView.swift
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build IPA
+        run: |
+          chmod +x build-ipa.sh
+          ./build-ipa.sh
+          test -f build/AirCard-iOS.ipa
+          cp build/AirCard-iOS.ipa build/AirCard-V7-Persistent-Diagnostic.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCard-V7-Persistent-Diagnostic
+          path: build/AirCard-V7-Persistent-Diagnostic.ipa
