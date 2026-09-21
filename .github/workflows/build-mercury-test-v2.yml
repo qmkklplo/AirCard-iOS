@@ -1,0 +1,107 @@
+name: Build AirCard Mercury Test v2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Apply Mercury Test v2 patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path("ios-app/TendiesEngine.swift")
+          s = p.read_text()
+
+          old_call = "updatePlistIdentifiers(in: descItem.url, randomizedID: randomizedID)"
+          new_call = (
+              "updatePlistIdentifiers("
+              "in: descItem.url, "
+              "randomizedID: randomizedID, "
+              "preserveDescriptorIdentifier: descItem.ext == "
+              '"com.apple.MercuryPoster"'
+              ")"
+          )
+
+          if old_call not in s:
+              raise SystemExit("Call site not found")
+
+          s = s.replace(old_call, new_call, 1)
+
+          old_sig = (
+              "private func updatePlistIdentifiers("
+              "in folderURL: URL, randomizedID: Int) {"
+          )
+
+          new_sig = (
+              "private func updatePlistIdentifiers("
+              "in folderURL: URL, "
+              "randomizedID: Int, "
+              "preserveDescriptorIdentifier: Bool = false"
+              ") {"
+          )
+
+          if old_sig not in s:
+              raise SystemExit("Function signature not found")
+
+          s = s.replace(old_sig, new_sig, 1)
+
+          old_block = (
+              'if fileName == "com.apple.posterkit.provider.descriptor.identifier" {\n'
+              '                try? "\\(randomizedID)".data(using: .utf8)?.write(to: fileURL)\n'
+              '            } else if fileName == "com.apple.posterkit.provider.contents.userInfo" {'
+          )
+
+          new_block = (
+              'if fileName == "com.apple.posterkit.provider.descriptor.identifier" {\n'
+              '                if !preserveDescriptorIdentifier {\n'
+              '                    try? "\\(randomizedID)".data(using: .utf8)?.write(to: fileURL)\n'
+              '                }\n'
+              '            } else if fileName == "com.apple.posterkit.provider.contents.userInfo" {'
+          )
+
+          if old_block not in s:
+              raise SystemExit("Descriptor identifier block not found")
+
+          s = s.replace(old_block, new_block, 1)
+
+          p.write_text(s)
+
+          print("Mercury Test v2 patch applied successfully")
+
+      - name: Verify Mercury patch
+        run: |
+          grep -n "preserveDescriptorIdentifier" ios-app/TendiesEngine.swift
+          grep -n "com.apple.MercuryPoster" ios-app/TendiesEngine.swift
+
+      - name: Build unsigned IPA
+        run: |
+          chmod +x build-ipa.sh
+          ./build-ipa.sh
+
+      - name: Locate IPA
+        run: |
+          find build -maxdepth 2 -type f -name "*.ipa" -print
+          test -f build/AirCard-iOS.ipa
+
+      - name: Rename artifact
+        run: |
+          cp build/AirCard-iOS.ipa build/AirCard-Mercury-Test-v2.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCard-Mercury-Test-v2
+          path: build/AirCard-Mercury-Test-v2.ipa
+          if-no-files-found: error
