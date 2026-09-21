@@ -1,0 +1,76 @@
+name: Build AirCard Mercury Test v1
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Apply Mercury Test v1 patch
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path("ios-app/TendiesEngine.swift")
+          s = p.read_text()
+
+          old_call = '                updatePlistIdentifiers(in: descItem.url, randomizedID: randomizedID)'
+          new_call = '''                let preserveSemanticDescriptorID = (descItem.ext == "com.apple.MercuryPoster")
+                updatePlistIdentifiers(
+                    in: descItem.url,
+                    randomizedID: randomizedID,
+                    preserveDescriptorIdentifier: preserveSemanticDescriptorID
+                )'''
+          if old_call not in s:
+              raise SystemExit("Expected updatePlistIdentifiers call not found; upstream source changed.")
+          s = s.replace(old_call, new_call, 1)
+
+          old_sig = '    private func updatePlistIdentifiers(in folderURL: URL, randomizedID: Int) {'
+          new_sig = '''    private func updatePlistIdentifiers(
+        in folderURL: URL,
+        randomizedID: Int,
+        preserveDescriptorIdentifier: Bool = false
+    ) {'''
+          if old_sig not in s:
+              raise SystemExit("Expected updatePlistIdentifiers signature not found; upstream source changed.")
+          s = s.replace(old_sig, new_sig, 1)
+
+          old_line = '                try? "\\(randomizedID)".data(using: .utf8)?.write(to: fileURL)'
+          new_lines = '''                if !preserveDescriptorIdentifier {
+                    try? "\\(randomizedID)".data(using: .utf8)?.write(to: fileURL)
+                }'''
+          if old_line not in s:
+              raise SystemExit("Expected descriptor identifier write line not found; upstream source changed.")
+          s = s.replace(old_line, new_lines, 1)
+
+          p.write_text(s)
+          print("Mercury Test v1 patch applied.")
+
+      - name: Build unsigned IPA
+        run: |
+          chmod +x build-ipa.sh
+          ./build-ipa.sh
+
+      - name: Locate IPA
+        run: |
+          find build -maxdepth 2 -type f -name "*.ipa" -print
+          test -f build/AirCard-iOS.ipa
+
+      - name: Rename artifact
+        run: cp build/AirCard-iOS.ipa build/AirCard-Mercury-Test-v1.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCard-Mercury-Test-v1
+          path: build/AirCard-Mercury-Test-v1.ipa
+          if-no-files-found: error
