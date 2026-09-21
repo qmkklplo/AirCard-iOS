@@ -300,13 +300,23 @@ public final class TendiesEngine {
             log("  ✨ Found \(descriptors.count) descriptor(s) to install")
 
             for (descIndex, descItem) in descriptors.enumerated() {
-                let targetUUID = UUID().uuidString.uppercased()
+                // MercuryPoster descriptor folders may participate in provider-side
+                // registration by their original UUID. Preserve that UUID for Mercury
+                // as a single-variable V5 experiment; other providers keep AirCard's
+                // randomized destination UUID behavior.
+                let preservesMercuryDescriptorUUID = descItem.ext == "com.apple.MercuryPoster"
+                let sourceDescriptorUUID = descItem.url.lastPathComponent.uppercased()
+                let targetUUID = preservesMercuryDescriptorUUID
+                    ? sourceDescriptorUUID
+                    : UUID().uuidString.uppercased()
                 let randomizedID = Int.random(in: 10000...99999)
                 log("  [\(descIndex + 1)/\(descriptors.count)] Descriptor \(targetUUID) (ID: \(randomizedID)) for \(descItem.ext)…")
+                if preservesMercuryDescriptorUUID {
+                    log("    ☿ Mercury V5: preserving source descriptor UUID \(sourceDescriptorUUID)")
+                }
 
                 // MercuryPoster descriptors carry semantic identifiers that must remain
-                // consistent across their descriptor payload. Keep those identifiers intact,
-                // while retaining the randomized destination UUID used for storage isolation.
+                // consistent across their descriptor payload. Keep those identifiers intact.
                 let preservesSemanticIdentifiers = descItem.ext == "com.apple.MercuryPoster"
                 updatePlistIdentifiers(
                     in: descItem.url,
