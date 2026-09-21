@@ -20,39 +20,51 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
+
           p = Path("ios-app/TendiesEngine.swift")
           s = p.read_text()
 
-          old_call = '                updatePlistIdentifiers(in: descItem.url, randomizedID: randomizedID)'
-          new_call = '''                let preserveSemanticDescriptorID = (descItem.ext == "com.apple.MercuryPoster")
-                updatePlistIdentifiers(
-                    in: descItem.url,
-                    randomizedID: randomizedID,
-                    preserveDescriptorIdentifier: preserveSemanticDescriptorID
-                )'''
+          old_call = "updatePlistIdentifiers(in: descItem.url, randomizedID: randomizedID)"
+          new_call = "\n".join([
+              "updatePlistIdentifiers(",
+              "    in: descItem.url,",
+              "    randomizedID: randomizedID,",
+              "    preserveDescriptorIdentifier: targetExtension == \"com.apple.MercuryPoster\"",
+              ")"
+          ])
+
           if old_call not in s:
-              raise SystemExit("Expected updatePlistIdentifiers call not found; upstream source changed.")
+              raise SystemExit("Expected updatePlistIdentifiers call not found")
+
           s = s.replace(old_call, new_call, 1)
 
-          old_sig = '    private func updatePlistIdentifiers(in folderURL: URL, randomizedID: Int) {'
-          new_sig = '''    private func updatePlistIdentifiers(
-        in folderURL: URL,
-        randomizedID: Int,
-        preserveDescriptorIdentifier: Bool = false
-    ) {'''
+          old_sig = "private func updatePlistIdentifiers(in folderURL: URL, randomizedID: Int) {"
+          new_sig = "\n".join([
+              "private func updatePlistIdentifiers(",
+              "    in folderURL: URL,",
+              "    randomizedID: Int,",
+              "    preserveDescriptorIdentifier: Bool = false",
+              ") {"
+          ])
+
           if old_sig not in s:
-              raise SystemExit("Expected updatePlistIdentifiers signature not found; upstream source changed.")
+              raise SystemExit("Expected updatePlistIdentifiers function not found")
+
           s = s.replace(old_sig, new_sig, 1)
 
-          old_line = '                try? "\\(randomizedID)".data(using: .utf8)?.write(to: fileURL)'
-          new_lines = '''                if !preserveDescriptorIdentifier {
-                    try? "\\(randomizedID)".data(using: .utf8)?.write(to: fileURL)
-                }'''
-          if old_line not in s:
-              raise SystemExit("Expected descriptor identifier write line not found; upstream source changed.")
-          s = s.replace(old_line, new_lines, 1)
+          old_line = 'try? "\\(randomizedID)".data(using: .utf8)?.write(to: identifierURL)'
+          new_lines = "\n".join([
+              "if !preserveDescriptorIdentifier {",
+              '    try? "\\(randomizedID)".data(using: .utf8)?.write(to: identifierURL)',
+              "}"
+          ])
 
+          if old_line not in s:
+              raise SystemExit("Expected descriptor identifier write not found")
+
+          s = s.replace(old_line, new_lines, 1)
           p.write_text(s)
+
           print("Mercury Test v1 patch applied.")
 
       - name: Build unsigned IPA
