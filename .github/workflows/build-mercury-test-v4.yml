@@ -1,0 +1,85 @@
+name: Build AirCard Mercury Test v4
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Patch Mercury v4
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path("ios-app/TendiesEngine.swift")
+          s = p.read_text()
+
+          old = "updatePlistIdentifiers(in: descItem.url, randomizedID: randomizedID)"
+          new = 'updatePlistIdentifiers(in: descItem.url, randomizedID: randomizedID, preserveMercuryIdentifiers: descItem.ext == "com.apple.MercuryPoster")'
+          assert old in s, "Call site not found"
+          s = s.replace(old, new, 1)
+
+          old = "private func updatePlistIdentifiers(in folderURL: URL, randomizedID: Int) {"
+          new = "private func updatePlistIdentifiers(in folderURL: URL, randomizedID: Int, preserveMercuryIdentifiers: Bool = false) {"
+          assert old in s, "Function signature not found"
+          s = s.replace(old, new, 1)
+
+          old = '                try? "\\(randomizedID)".data(using: .utf8)?.write(to: fileURL)'
+          new = '''                if !preserveMercuryIdentifiers {
+                      try? "\\(randomizedID)".data(using: .utf8)?.write(to: fileURL)
+                  }'''
+          assert old in s, "Descriptor identifier line not found"
+          s = s.replace(old, new, 1)
+
+          old = '                    plist["wallpaperRepresentingIdentifier"] = randomizedID'
+          new = '''                    if !preserveMercuryIdentifiers {
+                          plist["wallpaperRepresentingIdentifier"] = randomizedID
+                      }'''
+          assert old in s, "wallpaperRepresentingIdentifier not found"
+          s = s.replace(old, new, 1)
+
+          old = '                    plist["identifier"] = randomizedID'
+          new = '''                    if !preserveMercuryIdentifiers {
+                          plist["identifier"] = randomizedID
+                      }'''
+          assert old in s, "Wallpaper.plist identifier not found"
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          print("Mercury Test v4 patch applied")
+
+      - name: Verify Mercury v4
+        run: |
+          grep -n "preserveMercuryIdentifiers" ios-app/TendiesEngine.swift
+          grep -n "wallpaperRepresentingIdentifier" ios-app/TendiesEngine.swift
+          grep -n 'plist\["identifier"\]' ios-app/TendiesEngine.swift
+          grep -n "com.apple.MercuryPoster" ios-app/TendiesEngine.swift
+
+      - name: Build IPA
+        run: |
+          chmod +x build-ipa.sh
+          ./build-ipa.sh
+          test -f build/AirCard-iOS.ipa
+          cp build/AirCard-iOS.ipa build/AirCard-Mercury-Test-v4.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCard-Mercury-Test-v4
+          path: build/AirCard-Mercury-Test-v4.ipa
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete mercury-test-v4 --cleanup-tag -y 2>/dev/null || true
+          gh release create mercury-test-v4 build/AirCard-Mercury-Test-v4.ipa --target "${{ github.sha }}" --title "AirCard Mercury Test v4" --notes "Mercury Test v4 - preserves all three Mercury identifier fields."
