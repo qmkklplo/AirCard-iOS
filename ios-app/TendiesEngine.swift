@@ -365,9 +365,13 @@ public final class TendiesEngine {
         let prefDict: [String: Any] = [
             "PBF_RESET_FILE_PROTECTIONS": true,
             "PBF_LOCALE_DID_CHANGE": false,
+            // V6 registration-layer experiment: keep MercuryPoster in PosterBoard's
+            // persisted provider/container set so a cache refresh does not only retain
+            // Collections providers. All V5 descriptor/identifier behavior is unchanged.
             "PersistedPosterContainerBundleIdentifiers": [
                 "com.apple.Posters.CollectionsPosterApp",
-                "com.apple.WallpaperKit.CollectionsPoster"
+                "com.apple.WallpaperKit.CollectionsPoster",
+                "com.apple.MercuryPoster"
             ],
             "CompletedPosterBundleIdentifierMigrations": [
                 "com.apple.Posters.UnityPosterApp.ExtragalacticPoster",
