@@ -304,8 +304,15 @@ public final class TendiesEngine {
                 let randomizedID = Int.random(in: 10000...99999)
                 log("  [\(descIndex + 1)/\(descriptors.count)] Descriptor \(targetUUID) (ID: \(randomizedID)) for \(descItem.ext)…")
 
-                // Update plist identifiers to ensure unique indexing without collisions
-                updatePlistIdentifiers(in: descItem.url, randomizedID: randomizedID)
+                // MercuryPoster descriptors carry semantic identifiers that must remain
+                // consistent across their descriptor payload. Keep those identifiers intact,
+                // while retaining the randomized destination UUID used for storage isolation.
+                let preservesSemanticIdentifiers = descItem.ext == "com.apple.MercuryPoster"
+                updatePlistIdentifiers(
+                    in: descItem.url,
+                    randomizedID: randomizedID,
+                    preserveSemanticIdentifiers: preservesSemanticIdentifiers
+                )
 
                 for sVer in versionsToWrite {
                     // Primary destination
@@ -476,9 +483,17 @@ public final class TendiesEngine {
         }
     }
 
-    // MARK: - Plist Identifier Randomization (Matches Nugget implementation)
+    // MARK: - Plist Identifier Handling
 
-    private func updatePlistIdentifiers(in folderURL: URL, randomizedID: Int) {
+    /// Randomizes descriptor identifiers for poster providers that support AirCard's
+    /// collision-avoidance scheme. MercuryPoster descriptors are an exception: their
+    /// semantic identifiers are preserved as a unit, while the descriptor folder itself
+    /// still receives a randomized UUID at the injection layer.
+    private func updatePlistIdentifiers(
+        in folderURL: URL,
+        randomizedID: Int,
+        preserveSemanticIdentifiers: Bool = false
+    ) {
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(
             at: folderURL,
@@ -490,11 +505,15 @@ public final class TendiesEngine {
             let fileName = fileURL.lastPathComponent
 
             if fileName == "com.apple.posterkit.provider.descriptor.identifier" {
-                try? "\(randomizedID)".data(using: .utf8)?.write(to: fileURL)
+                if !preserveSemanticIdentifiers {
+                    try? "\(randomizedID)".data(using: .utf8)?.write(to: fileURL)
+                }
             } else if fileName == "com.apple.posterkit.provider.contents.userInfo" {
                 if let data = try? Data(contentsOf: fileURL),
                    var plist = (try? PropertyListSerialization.propertyList(from: data, options: .mutableContainers, format: nil)) as? [String: Any] {
-                    plist["wallpaperRepresentingIdentifier"] = randomizedID
+                    if !preserveSemanticIdentifiers {
+                        plist["wallpaperRepresentingIdentifier"] = randomizedID
+                    }
                     if let updated = try? PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0) {
                         try? updated.write(to: fileURL)
                     }
@@ -502,7 +521,9 @@ public final class TendiesEngine {
             } else if fileName.hasSuffix("Wallpaper.plist") {
                 if let data = try? Data(contentsOf: fileURL),
                    var plist = (try? PropertyListSerialization.propertyList(from: data, options: .mutableContainers, format: nil)) as? [String: Any] {
-                    plist["identifier"] = randomizedID
+                    if !preserveSemanticIdentifiers {
+                        plist["identifier"] = randomizedID
+                    }
                     if let updated = try? PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0) {
                         try? updated.write(to: fileURL)
                     }
