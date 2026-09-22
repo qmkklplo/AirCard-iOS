@@ -79,23 +79,33 @@ jobs:
           v = view.read_text()
 
           if "Auto NeoSpring After Flash" not in v:
-              m = re.search(r'(?P<indent>[ \t]*)Button\(role: \.destructive\) \{\s*vm\.isNeoSpringing = true', v)
-              if not m:
-                  raise SystemExit("Manual Respring button not found")
-              i = m.group("indent")
+              marker = "// Section 3: Wallpapers Gallery"
+              pos = v.find(marker)
+              if pos < 0:
+                  raise SystemExit("Wallpapers Gallery marker not found")
+              line_start = v.rfind("\\n", 0, pos) + 1
+              i = v[line_start:pos]
               toggle = (
-                  i + 'Toggle(isOn: $vm.autoNeoSpringAfterFlash) {\n'
-                  + i + '    VStack(alignment: .leading, spacing: 2) {\n'
-                  + i + '        Text("Auto NeoSpring After Flash")\n'
-                  + i + '            .font(.subheadline.bold())\n'
-                  + i + '        Text("OFF keeps AirCard open and preserves the complete flash log.")\n'
-                  + i + '            .font(.caption)\n'
-                  + i + '            .foregroundStyle(.secondary)\n'
-                  + i + '    }\n'
-                  + i + '}\n'
-                  + i + '\n\n'
+                  i + 'Section {\\n'
+                  + i + '    Toggle(isOn: $vm.autoNeoSpringAfterFlash) {\\n'
+                  + i + '        VStack(alignment: .leading, spacing: 2) {\\n'
+                  + i + '            Text("Auto NeoSpring After Flash")\\n'
+                  + i + '                .font(.subheadline.bold())\\n'
+                  + i + '            Text("OFF keeps AirCard open and preserves the complete flash log.")\\n'
+                  + i + '                .font(.caption)\\n'
+                  + i + '                .foregroundStyle(.secondary)\\n'
+                  + i + '        }\\n'
+                  + i + '    }\\n'
+                  + i + '}\\n\\n'
               )
               v = v[:line_start] + toggle + v[line_start:]
+
+          cache_pos = v.find("Force PosterBoard Cache Refresh")
+          auto_pos = v.find("Auto NeoSpring After Flash")
+          gallery_pos = v.find("// Section 3: Wallpapers Gallery")
+          if not (0 <= cache_pos < auto_pos < gallery_pos):
+              raise SystemExit("V10.2 UI order verification failed")
+          print("Verified V10.2 UI placement")
 
           v = v.replace(
               'Text("Flashing will automatically trigger NeoSpring to respring the device and apply your new wallpapers.")',
