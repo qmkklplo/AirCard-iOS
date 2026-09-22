@@ -73,36 +73,51 @@ jobs:
           vm.write_text(s)
           print("Patched:", vm)
 
-          view = next((p for p in files if 'Respring (NeoSpring)' in p.read_text(errors="ignore")), None)
+          view = next((p for p in files if 'Force PosterBoard Cache Refresh' in p.read_text(errors="ignore") and 'Respring (NeoSpring)' in p.read_text(errors="ignore")), None)
           if view is None:
-              raise SystemExit("Wallpapers view not found")
+              raise SystemExit("TendiesView not found")
           v = view.read_text()
 
-          if "Auto NeoSpring After Flash" not in v:
-              m = re.search(r'(?P<indent>[ \t]*)Button\(role: \.destructive\) \{\s*vm\.isNeoSpringing = true', v)
-              if not m:
-                  raise SystemExit("Manual Respring button not found")
-              i = m.group("indent")
-              toggle = (
-                  i + 'Toggle(isOn: $vm.autoNeoSpringAfterFlash) {\n'
-                  + i + '    VStack(alignment: .leading, spacing: 2) {\n'
-                  + i + '        Text("Auto NeoSpring After Flash")\n'
-                  + i + '            .font(.subheadline.bold())\n'
-                  + i + '        Text("OFF keeps AirCard open and preserves the complete flash log.")\n'
-                  + i + '            .font(.caption)\n'
-                  + i + '            .foregroundStyle(.secondary)\n'
-                  + i + '    }\n'
-                  + i + '}\n'
-                  + i + '.tint(.blue)\n\n'
-              )
-              v = v[:m.start()] + toggle + v[m.start():]
+          boundary = '''                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
+                // Section 3: Wallpapers Gallery'''
+          replacement = '''                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Toggle(isOn: $vm.autoNeoSpringAfterFlash) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Auto NeoSpring After Flash")
+                                .font(.subheadline.weight(.medium))
+                            Text("OFF keeps AirCard open and preserves the complete flash log.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
+                // Section 3: Wallpapers Gallery'''
+          if boundary not in v:
+              raise SystemExit("Section 2 boundary not found")
+          v = v.replace(boundary, replacement, 1)
 
           v = v.replace(
               'Text("Flashing will automatically trigger NeoSpring to respring the device and apply your new wallpapers.")',
               'Text("V10.1: Auto NeoSpring is OFF by default. Review the complete flash log, then use manual Respring when ready.")'
           )
+
+          pc = v.find('Text("Force PosterBoard Cache Refresh")')
+          pa = v.find('Text("Auto NeoSpring After Flash")')
+          pg = v.find('// Section 3: Wallpapers Gallery')
+          if not (0 <= pc < pa < pg):
+              raise SystemExit("Settings layout verification failed")
+          # Deliberately no .tint(.blue): same default toggle color as Cache Refresh.
           view.write_text(v)
-          print("Patched:", view)
+          print("Verified: Cache Refresh -> Auto NeoSpring -> Gallery")
+          print("Verified: Auto NeoSpring uses default Toggle tint")
 
           pbx = next(Path(".").rglob("project.pbxproj"), None)
           if pbx is None:
