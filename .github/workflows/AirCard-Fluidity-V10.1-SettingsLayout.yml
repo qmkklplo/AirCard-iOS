@@ -1,4 +1,4 @@
-name: Build AirCard Fluidity V10.1 Integrated
+name: AirCard Fluidity V10.1
 
 on:
   workflow_dispatch:
