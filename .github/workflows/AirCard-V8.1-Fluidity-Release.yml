@@ -1,0 +1,125 @@
+name: Build AirCard Fluidity V8.1 IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew install rust
+          cargo install cargo-lipo || true
+
+      - name: Locate project
+        id: project
+        shell: bash
+        run: |
+          set -e
+          echo "Repository contents:"
+          ls -la
+
+          XCODEPROJ="$(find . -maxdepth 4 -name '*.xcodeproj' -print -quit)"
+          if [ -z "$XCODEPROJ" ]; then
+            echo "::error::No .xcodeproj found. Upload/extract the V8.1 source into the repository first."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$XCODEPROJ")"
+          PROJECT_NAME="$(basename "$XCODEPROJ")"
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "project=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Build Rust core if present
+        shell: bash
+        run: |
+          set -e
+          if [ -f "rust-core/Cargo.toml" ]; then
+            cd rust-core
+          elif [ -f "${{ steps.project.outputs.dir }}/../rust-core/Cargo.toml" ]; then
+            cd "${{ steps.project.outputs.dir }}/../rust-core"
+          else
+            echo "No rust-core Cargo.toml at expected locations; continuing."
+            exit 0
+          fi
+
+          if [ -f "./build.sh" ]; then
+            chmod +x ./build.sh
+            ./build.sh
+          elif [ -f "./build_ios.sh" ]; then
+            chmod +x ./build_ios.sh
+            ./build_ios.sh
+          else
+            echo "No Rust build script found; Xcode project may build/link it itself."
+          fi
+
+      - name: Detect scheme
+        id: scheme
+        shell: bash
+        run: |
+          set -e
+          cd "${{ steps.project.outputs.dir }}"
+          SCHEME="$(xcodebuild -project "${{ steps.project.outputs.project }}" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("project",{}).get("schemes") or [""])[0])')"
+          if [ -z "$SCHEME" ]; then
+            echo "::error::Could not detect an Xcode scheme."
+            exit 1
+          fi
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "Using scheme: $SCHEME"
+
+      - name: Build unsigned iOS app
+        shell: bash
+        run: |
+          set -e
+          cd "${{ steps.project.outputs.dir }}"
+          rm -rf "$RUNNER_TEMP/AirCardBuild"
+
+          xcodebuild \
+            -project "${{ steps.project.outputs.project }}" \
+            -scheme "${{ steps.scheme.outputs.scheme }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/AirCardBuild" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -e
+          APP="$(find "$RUNNER_TEMP/AirCardBuild/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -z "$APP" ]; then
+            echo "::error::Built .app not found."
+            exit 1
+          fi
+
+          rm -rf Payload release
+          mkdir -p Payload release
+          cp -R "$APP" Payload/
+          zip -qry "release/AirCard-iOS-Fluidity-V8.1.ipa" Payload
+          ls -lh release/
+
+      - name: Publish IPA to latest Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: AirCard Fluidity V8.1
+          body: |
+            AirCard Fluidity V8.1 test build.
+            - V8 App Container passthrough retained.
+            - Auto NeoSpring After Flash is OFF by default.
+            - Use the manual Respring button after reviewing the flash log.
+          prerelease: true
+          make_latest: true
+          files: release/AirCard-iOS-Fluidity-V8.1.ipa
+          fail_on_unmatched_files: true
