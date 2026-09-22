@@ -1,0 +1,177 @@
+name: AirCard Fluidity V10.2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      IPA_NAME: AirCard-iOS-Fluidity-V10.2.ipa
+
+    steps:
+      - name: Checkout V8 source
+        uses: actions/checkout@v5
+
+      - name: Integrate V10 features
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          files = list(Path(".").rglob("*.swift"))
+
+          vm = next((p for p in files if "flashTendies" in p.read_text(errors="ignore") and "triggerNeoSpring" in p.read_text(errors="ignore")), None)
+          if vm is None:
+              raise SystemExit("Could not locate flashTendies view-model")
+          s = vm.read_text()
+
+          anchor = '@Published var isNeoSpringing: Bool = false'
+          if "autoNeoSpringAfterFlash" not in s:
+              if anchor not in s:
+                  raise SystemExit("isNeoSpringing anchor missing")
+              setting = """
+              @Published var autoNeoSpringAfterFlash: Bool = UserDefaults.standard.object(forKey: "aircard.v10.auto_neospring") as? Bool ?? false {
+                  didSet {
+                      UserDefaults.standard.set(autoNeoSpringAfterFlash, forKey: "aircard.v10.auto_neospring")
+                  }
+              }
+              """
+              s = s.replace(anchor, anchor + setting, 1)
+
+          if "V10 Auto NeoSpring is OFF" not in s:
+              pattern = re.compile(
+                  r'(?P<indent>[ \t]*)tendiesFlashLog\.append\("🎉 Wallpapers applied successfully!"\)\s*'
+                  r'tendiesFlashLog\.append\("⚡ Triggering NeoSpring respring\.\.\."\)\s*'
+                  r'DispatchQueue\.main\.asyncAfter\(deadline: \.now\(\) \+ 0\.6\) \{ \[weak self\] in\s*'
+                  r'self\?\.isNeoSpringing = true\s*'
+                  r'RespringHelper\.triggerNeoSpring\(\)\s*\}',
+                  re.M
+              )
+              m = pattern.search(s)
+              if not m:
+                  raise SystemExit("Automatic NeoSpring block not found")
+              i = m.group("indent")
+              replacement = (
+                  i + 'tendiesFlashLog.append("🎉 Wallpapers applied successfully!")\n'
+                  + i + 'if autoNeoSpringAfterFlash {\n'
+                  + i + '    tendiesFlashLog.append("⚡ V10 Auto NeoSpring is ON — triggering respring...")\n'
+                  + i + '    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in\n'
+                  + i + '        self?.isNeoSpringing = true\n'
+                  + i + '        RespringHelper.triggerNeoSpring()\n'
+                  + i + '    }\n'
+                  + i + '} else {\n'
+                  + i + '    tendiesFlashLog.append("🧪 V10 Auto NeoSpring is OFF — complete flash log preserved. Use manual Respring when ready.")\n'
+                  + i + '}'
+              )
+              s = s[:m.start()] + replacement + s[m.end():]
+          vm.write_text(s)
+          print("Patched:", vm)
+
+          view = next((p for p in files if 'Respring (NeoSpring)' in p.read_text(errors="ignore")), None)
+          if view is None:
+              raise SystemExit("Wallpapers view not found")
+          v = view.read_text()
+
+          if "Auto NeoSpring After Flash" not in v:
+              m = re.search(r'(?P<indent>[ \t]*)Button\(role: \.destructive\) \{\s*vm\.isNeoSpringing = true', v)
+              if not m:
+                  raise SystemExit("Manual Respring button not found")
+              i = m.group("indent")
+              toggle = (
+                  i + 'Toggle(isOn: $vm.autoNeoSpringAfterFlash) {\n'
+                  + i + '    VStack(alignment: .leading, spacing: 2) {\n'
+                  + i + '        Text("Auto NeoSpring After Flash")\n'
+                  + i + '            .font(.subheadline.bold())\n'
+                  + i + '        Text("OFF keeps AirCard open and preserves the complete flash log.")\n'
+                  + i + '            .font(.caption)\n'
+                  + i + '            .foregroundStyle(.secondary)\n'
+                  + i + '    }\n'
+                  + i + '}\n'
+                  + i + '.tint(.blue)\n\n'
+              )
+              v = v[:m.start()] + toggle + v[m.start():]
+
+          v = v.replace(
+              'Text("Flashing will automatically trigger NeoSpring to respring the device and apply your new wallpapers.")',
+              'Text("V10.2: Auto NeoSpring is OFF by default. Review the complete flash log, then use manual Respring when ready.")'
+          )
+          view.write_text(v)
+          print("Patched:", view)
+
+          pbx = next(Path(".").rglob("project.pbxproj"), None)
+          if pbx is None:
+              raise SystemExit("project.pbxproj not found")
+          x = pbx.read_text()
+          x, a = re.subn(r'MARKETING_VERSION\s*=\s*[^;]+;', 'MARKETING_VERSION = 10.2;', x)
+          x, b = re.subn(r'CURRENT_PROJECT_VERSION\s*=\s*[^;]+;', 'CURRENT_PROJECT_VERSION = 1020;', x)
+          if not a or not b:
+              raise SystemExit("Version fields not found")
+          pbx.write_text(x)
+
+          print("V10.2 integration complete")
+          PY
+
+      - name: Detect project and scheme
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJ="$(find . -name '*.xcodeproj' -print -quit)"
+          test -n "$PROJ"
+          DIR="$(dirname "$PROJ")"
+          NAME="$(basename "$PROJ")"
+          SCHEME="$(cd "$DIR" && xcodebuild -project "$NAME" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("project",{}).get("schemes") or [""])[0])')"
+          test -n "$SCHEME"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "project=$NAME" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+
+      - name: Build V10.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.xcode.outputs.dir }}"
+          xcodebuild             -project "${{ steps.xcode.outputs.project }}"             -scheme "${{ steps.xcode.outputs.scheme }}"             -configuration Release             -sdk iphoneos             -derivedDataPath "$RUNNER_TEMP/AirCardV102"             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             MARKETING_VERSION=10.2             CURRENT_PROJECT_VERSION=1020             COMPILER_INDEX_STORE_ENABLE=NO             build
+
+      - name: Verify and fast-package
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/AirCardV102/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+          ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")
+          echo "Bundle ID: $ID"
+          echo "Version: $VERSION"
+          echo "Build: $BUILD"
+          [ "$VERSION" = "10.2" ]
+          [ "$BUILD" = "1020" ]
+
+          rm -rf Payload release
+          mkdir -p Payload release
+          cp -R "$APP" Payload/
+          zip -0qry "release/$IPA_NAME" Payload
+          unzip -Z1 "release/$IPA_NAME" | grep -q '^Payload/.*\.app/'
+          shasum -a 256 "release/$IPA_NAME" > release/AirCard-V10.2-SHA256.txt
+          ls -lh "release/$IPA_NAME"
+
+      - name: Publish standalone V10.2 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v10.2-fluidity"
+          TITLE="AirCard Fluidity V10.2"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "release/$IPA_NAME" release/AirCard-V10.2-SHA256.txt --clobber
+          else
+            gh release create "$TAG" "release/$IPA_NAME" release/AirCard-V10.2-SHA256.txt --title "$TITLE" --notes "AirCard Fluidity V10.2 integrated build."
+          fi
