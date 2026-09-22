@@ -78,34 +78,30 @@ jobs:
               raise SystemExit("TendiesView not found")
           v = view.read_text()
 
-          marker = '                // Section 3: Wallpapers Gallery'
-          marker_pos = v.find(marker)
-          if marker_pos < 0:
-              raise SystemExit("Wallpapers Gallery marker not found")
+          # Exact text verified against the V8 TendiesView.swift.
+          section3 = "                // Section 3: Wallpapers Gallery"
+          pos = v.find(section3)
+          if pos < 0:
+              raise SystemExit("Section 3 marker not found")
 
-          before = v[:marker_pos]
-          after = v[marker_pos:]
-          tail = '                        }\\n                    }\\n                }\\n\\n'
-          tail_pos = before.rfind(tail)
-          if tail_pos < 0:
-              raise SystemExit("Section 2 closing block not found")
+          # Insert a new settings Section immediately before Wallpapers Gallery.
+          # This places it directly below Cache Refresh and above the gallery.
+          auto_section = """                Section {
+                    Toggle(isOn: $vm.autoNeoSpringAfterFlash) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Auto NeoSpring After Flash")
+                                .font(.subheadline.weight(.medium))
+                            Text("OFF keeps AirCard open and preserves the complete flash log.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
 
-          auto_toggle = (
-              '                        }\\n\\n'
-              '                    Toggle(isOn: $vm.autoNeoSpringAfterFlash) {\\n'
-              '                        VStack(alignment: .leading, spacing: 2) {\\n'
-              '                            Text("Auto NeoSpring After Flash")\\n'
-              '                                .font(.subheadline.weight(.medium))\\n'
-              '                            Text("OFF keeps AirCard open and preserves the complete flash log.")\\n'
-              '                                .font(.caption2)\\n'
-              '                                .foregroundColor(.secondary)\\n'
-              '                        }\\n'
-              '                    }\\n'
-              '                }\\n\\n'
-          )
-          before = before[:tail_pos] + auto_toggle + before[tail_pos + len(tail):]
-          v = before + after
+"""
+          v = v[:pos] + auto_section + v[pos:]
 
+          # No .tint() here: use the same default green Toggle color as Cache Refresh.
           v = v.replace(
               'Text("Flashing will automatically trigger NeoSpring to respring the device and apply your new wallpapers.")',
               'Text("V10.1: Auto NeoSpring is OFF by default. Review the complete flash log, then use manual Respring when ready.")'
@@ -116,12 +112,12 @@ jobs:
           pg = v.find('// Section 3: Wallpapers Gallery')
           if not (0 <= pc < pa < pg):
               raise SystemExit("Settings layout verification failed")
-          if '.tint(' in v[pa:pg]:
-              raise SystemExit("Unexpected custom tint on Auto NeoSpring")
+          if '.tint(.blue)' in v[pa:pg]:
+              raise SystemExit("Unexpected blue tint on Auto NeoSpring")
 
           view.write_text(v)
           print("Verified layout: Cache Refresh -> Auto NeoSpring -> Gallery")
-          print("Verified color: Auto NeoSpring inherits default Toggle tint")
+          print("Verified color: no blue tint; default Toggle tint will be used")
 
           pbx = next(Path(".").rglob("project.pbxproj"), None)
           if pbx is None:
