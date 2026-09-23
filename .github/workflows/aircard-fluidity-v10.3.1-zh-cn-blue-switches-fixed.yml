@@ -1,0 +1,272 @@
+name: AirCard Fluidity V10.3.1 中文版
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      IPA_NAME: AirCard-iOS-Fluidity-V10.3.1-ZH.ipa
+
+    steps:
+      - name: Checkout V8 source
+        uses: actions/checkout@v5
+
+      - name: Integrate V10 features
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          files = list(Path(".").rglob("*.swift"))
+
+          vm = next((p for p in files if "flashTendies" in p.read_text(errors="ignore") and "triggerNeoSpring" in p.read_text(errors="ignore")), None)
+          if vm is None:
+              raise SystemExit("Could not locate flashTendies view-model")
+          s = vm.read_text()
+
+          anchor = '@Published var isNeoSpringing: Bool = false'
+          if "autoNeoSpringAfterFlash" not in s:
+              if anchor not in s:
+                  raise SystemExit("isNeoSpringing anchor missing")
+              setting = """
+              @Published var autoNeoSpringAfterFlash: Bool = UserDefaults.standard.object(forKey: "aircard.v10.auto_neospring") as? Bool ?? false {
+                  didSet {
+                      UserDefaults.standard.set(autoNeoSpringAfterFlash, forKey: "aircard.v10.auto_neospring")
+                  }
+              }
+              """
+              s = s.replace(anchor, anchor + setting, 1)
+
+          if "V10 Auto NeoSpring is OFF" not in s:
+              pattern = re.compile(
+                  r'(?P<indent>[ \t]*)tendiesFlashLog\.append\("🎉 Wallpapers applied successfully!"\)\s*'
+                  r'tendiesFlashLog\.append\("⚡ Triggering NeoSpring respring\.\.\."\)\s*'
+                  r'DispatchQueue\.main\.asyncAfter\(deadline: \.now\(\) \+ 0\.6\) \{ \[weak self\] in\s*'
+                  r'self\?\.isNeoSpringing = true\s*'
+                  r'RespringHelper\.triggerNeoSpring\(\)\s*\}',
+                  re.M
+              )
+              m = pattern.search(s)
+              if not m:
+                  raise SystemExit("Automatic NeoSpring block not found")
+              i = m.group("indent")
+              replacement = (
+                  i + 'tendiesFlashLog.append("🎉 Wallpapers applied successfully!")\n'
+                  + i + 'if autoNeoSpringAfterFlash {\n'
+                  + i + '    tendiesFlashLog.append("⚡ V10 Auto NeoSpring is ON — triggering respring...")\n'
+                  + i + '    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in\n'
+                  + i + '        self?.isNeoSpringing = true\n'
+                  + i + '        RespringHelper.triggerNeoSpring()\n'
+                  + i + '    }\n'
+                  + i + '} else {\n'
+                  + i + '    tendiesFlashLog.append("🧪 V10 Auto NeoSpring is OFF — complete flash log preserved. Use manual Respring when ready.")\n'
+                  + i + '}'
+              )
+              s = s[:m.start()] + replacement + s[m.end():]
+          vm.write_text(s)
+          print("Patched:", vm)
+
+          view = next((p for p in files if 'Respring (NeoSpring)' in p.read_text(errors="ignore")), None)
+          if view is None:
+              raise SystemExit("Wallpapers view not found")
+          v = view.read_text()
+
+          if "Auto NeoSpring After Flash" not in v:
+              marker = "// Section 3: Wallpapers Gallery"
+              pos = v.find(marker)
+              if pos < 0:
+                  raise SystemExit("Wallpapers Gallery marker not found")
+              line_start = v.rfind("\n", 0, pos) + 1
+              i = v[line_start:pos]
+              toggle = (
+                  i + 'Section {\n'
+                  + i + '    Toggle(isOn: $vm.autoNeoSpringAfterFlash) {\n'
+                  + i + '        VStack(alignment: .leading, spacing: 2) {\n'
+                  + i + '            Text("Auto NeoSpring After Flash")\n'
+                  + i + '                .font(.subheadline.bold())\n'
+                  + i + '            Text("OFF keeps AirCard open and preserves the complete flash log.")\n'
+                  + i + '                .font(.caption)\n'
+                  + i + '                .foregroundStyle(.secondary)\n'
+                  + i + '        }\n'
+                  + i + '    }\n'
+                  + i + '}\n\n'
+              )
+              v = v[:line_start] + toggle + v[line_start:]
+
+          cache_pos = v.find("Force PosterBoard Cache Refresh")
+          auto_pos = v.find("Auto NeoSpring After Flash")
+          gallery_pos = v.find("// Section 3: Wallpapers Gallery")
+          if not (0 <= cache_pos < auto_pos < gallery_pos):
+              raise SystemExit("V10.2 UI placement verification failed")
+
+          v = v.replace(
+              'Text("Flashing will automatically trigger NeoSpring to respring the device and apply your new wallpapers.")',
+              'EmptyView()'
+          )
+          view.write_text(v)
+          print("Patched:", view)
+
+          # V10.3 Simplified Chinese UI localization.
+          # Only user-visible Swift string literals are translated.
+          translations = {
+              "Pairing": "配对",
+              "Wallet Cards": "钱包卡片",
+              "Passcode": "密码",
+              "Wallpapers": "壁纸",
+              "Choose .tendies from Files...": "从文件选择 .tendies...",
+              "PosterBoard container will be auto-detected automatically on flash.": "刷入时将自动检测 PosterBoard 容器。",
+              "Force PosterBoard Cache Refresh": "强制刷新 PosterBoard 缓存",
+              "Resets file protections so iOS re-indexes wallpapers immediately": "重置文件保护，使 iOS 立即重新索引壁纸",
+              "Auto NeoSpring After Flash": "刷入后自动 NeoSpring",
+              "OFF keeps AirCard open and preserves the complete flash log.": "关闭后保持 AirCard 运行，并保留完整刷入日志。",
+              "Wallpapers Gallery": "壁纸库",
+              "Wallpapers Imported": "个壁纸已导入",
+              "Wallpaper Imported": "个壁纸已导入",
+              "Deselect All": "取消全选",
+              "Select All": "全选",
+              "No .tendies wallpapers loaded yet": "尚未载入 .tendies 壁纸",
+              "Tap 'Choose .tendies from Files' or copy wallpapers into On My iPhone › AirCard-iOS.": "点击“从文件选择 .tendies”，或将壁纸复制到“我的 iPhone › AirCard-iOS”。",
+              "Respring (NeoSpring)": "重启桌面（NeoSpring）",
+              "Flash": "刷入",
+              "Wallpaper": "壁纸",
+              "Wallpapers": "壁纸",
+              "Imported": "已导入",
+              "App Container": "App 容器",
+              "Descriptor": "描述符",
+              "Descriptors": "描述符",
+              "Target Extension": "目标扩展",
+              "Format": "格式",
+              "Name": "名称",
+              "Close": "关闭",
+              "Done": "完成",
+              "Cancel": "取消",
+              "Delete": "删除",
+              "Error": "错误",
+              "Success": "成功",
+              "Loading...": "正在载入...",
+              "No wallpapers found": "未找到壁纸",
+          }
+
+          # Translate exact Swift string literals only. This avoids touching
+          # identifiers, bundle IDs, AirLift protocol strings and file formats.
+          for swift_file in Path(".").rglob("*.swift"):
+              text = swift_file.read_text(errors="ignore")
+              original_text = text
+              for en, zh in translations.items():
+                  text = text.replace('"' + en + '"', '"' + zh + '"')
+              if text != original_text:
+                  swift_file.write_text(text)
+                  print("Localized:", swift_file)
+
+          # V10.3.1: make every enabled switch use iOS system blue.
+          app_file = next((p for p in files if "@main" in p.read_text(errors="ignore") and "App" in p.read_text(errors="ignore")), None)
+          if app_file is None:
+              raise SystemExit("App entry file not found")
+          app_text = app_file.read_text()
+          if "UISwitch.appearance().onTintColor = .systemBlue" not in app_text:
+              if "import UIKit" not in app_text:
+                  app_text = app_text.replace("import SwiftUI", "import SwiftUI\nimport UIKit", 1)
+              main_struct = re.search(r'(@main\s+(?:public\s+)?struct\s+\w+\s*:\s*App\s*\{)', app_text)
+              if not main_struct:
+                  raise SystemExit("SwiftUI App entry struct not found")
+              init_code = (
+                  main_struct.group(1)
+                  + '\n    init() {\n'
+                  + '        UISwitch.appearance().onTintColor = .systemBlue\n'
+                  + '    }'
+              )
+              app_text = app_text[:main_struct.start()] + init_code + app_text[main_struct.end():]
+              app_file.write_text(app_text)
+              print("Applied global blue switch tint:", app_file)
+
+          pbx = next(Path(".").rglob("project.pbxproj"), None)
+          if pbx is None:
+              raise SystemExit("project.pbxproj not found")
+          x = pbx.read_text()
+          x, a = re.subn(r'MARKETING_VERSION\s*=\s*[^;]+;', 'MARKETING_VERSION = 10.3.1;', x)
+          x, b = re.subn(r'CURRENT_PROJECT_VERSION\s*=\s*[^;]+;', 'CURRENT_PROJECT_VERSION = 1031;', x)
+          if not a or not b:
+              raise SystemExit("Version fields not found")
+          pbx.write_text(x)
+
+          print("V10.2 integration complete")
+          PY
+
+      - name: Detect project and scheme
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJ="$(find . -name '*.xcodeproj' -print -quit)"
+          test -n "$PROJ"
+          DIR="$(dirname "$PROJ")"
+          NAME="$(basename "$PROJ")"
+          SCHEME="$(cd "$DIR" && xcodebuild -project "$NAME" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("project",{}).get("schemes") or [""])[0])')"
+          test -n "$SCHEME"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "project=$NAME" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+
+      - name: Build V10.3.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.xcode.outputs.dir }}"
+          xcodebuild             -project "${{ steps.xcode.outputs.project }}"             -scheme "${{ steps.xcode.outputs.scheme }}"             -configuration Release             -sdk iphoneos             -derivedDataPath "$RUNNER_TEMP/AirCardV1031"             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             MARKETING_VERSION=10.3.1             CURRENT_PROJECT_VERSION=1031             COMPILER_INDEX_STORE_ENABLE=NO             build
+
+      - name: Verify and fast-package
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/AirCardV1031/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 10.3.1" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1031" "$APP/Info.plist"
+
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+          ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")
+          echo "Bundle ID: $ID"
+          echo "Version: $VERSION"
+          echo "Build: $BUILD"
+          [ "$VERSION" = "10.3.1" ]
+          [ "$BUILD" = "1031" ]
+
+          rm -rf Payload release
+          mkdir -p Payload release
+          cp -R "$APP" Payload/
+          zip -0qry "release/$IPA_NAME" Payload
+          unzip -Z1 "release/$IPA_NAME" | grep -q '^Payload/.*\.app/'
+
+          rm -rf "$RUNNER_TEMP/ipa-check"
+          mkdir -p "$RUNNER_TEMP/ipa-check"
+          unzip -q "release/$IPA_NAME" -d "$RUNNER_TEMP/ipa-check"
+          PACKED_APP="$(find "$RUNNER_TEMP/ipa-check/Payload" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$PACKED_APP"
+          test "$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PACKED_APP/Info.plist")" = "$ID"
+          test "$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PACKED_APP/Info.plist")" = "10.3.1"
+          test "$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PACKED_APP/Info.plist")" = "1031"
+
+          shasum -a 256 "release/$IPA_NAME" > release/AirCard-V10.3.1-ZH-SHA256.txt
+          ls -lh "release/$IPA_NAME"
+
+      - name: Publish standalone V10.3.1 中文版 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v10.3.1-fluidity-zh"
+          TITLE="AirCard Fluidity V10.3.1 中文版"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "release/$IPA_NAME" release/AirCard-V10.3.1-ZH-SHA256.txt --clobber
+          else
+            gh release create "$TAG" "release/$IPA_NAME" release/AirCard-V10.3.1-ZH-SHA256.txt --title "$TITLE" --notes "AirCard Fluidity V10.3.1 简体中文版 integrated build."
+          fi
