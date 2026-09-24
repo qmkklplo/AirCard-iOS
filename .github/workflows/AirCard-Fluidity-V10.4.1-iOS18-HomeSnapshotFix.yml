@@ -39,6 +39,38 @@ jobs:
           RB
           bash /tmp/base-step-0.sh
           bash /tmp/base-step-1.sh
+
+          # The combined Blur step also injects the old experimental toggle/state.
+          # The dynamic engine step is never executed; remove only that leftover UI/state.
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          vm = Path("ios-app/AppViewModel.swift")
+          src = vm.read_text()
+          src, n = re.subn(
+              r'\n\s*@Published var ios18FluidityDynamicEnabled: Bool = UserDefaults\.standard\.object\(forKey: "aircard\.v10\.ios18_fluidity_dynamic"\).*?\n\s*}\n',
+              '\n', src, count=1, flags=re.S
+          )
+          if n != 1:
+              raise SystemExit("Could not remove dynamic-mode AppViewModel state")
+          vm.write_text(src)
+
+          view = Path("ios-app/TendiesView.swift")
+          v = view.read_text()
+          start = v.find('                    Toggle(isOn: $vm.ios18FluidityDynamicEnabled) {')
+          if start >= 0:
+              end = v.find('                    Toggle(isOn: $vm.homeScreenBlurEnabled) {', start)
+              if end < 0:
+                  raise SystemExit("Could not delimit dynamic toggle")
+              v = v[:start] + v[end:]
+          old_footer = '                    Text("动态模式 ON：刷入 MercuryPoster 时写入 fluidity.dynamic / Automatic / dynamic；OFF：不套用测试字段。主屏幕模糊使用已实机验证的 459C311E… / versions/18 / supplement 5，两个开关互相独立。")'
+          new_footer = '                    Text("主屏幕模糊使用已实机验证的 459C311E… / versions/18 / supplement 5。刷入壁纸时会自动同步这里选择的 Blur 状态。")'
+          v = v.replace(old_footer, new_footer)
+          v = v.replace('// Fluidity: iOS18 Dynamic + Home Screen Blur', '// Fluidity: iOS18 Home Screen Blur')
+          view.write_text(v)
+          PY
+
           ! grep -R -n -E 'fluidity\.dynamic|aircard\.v10\.ios18_fluidity_dynamic|applyIOS18FluidityDynamicMode|iOS 18 Fluidity 动态模式' ios-app
 
       - name: Integrate Home Snapshot regeneration fix
