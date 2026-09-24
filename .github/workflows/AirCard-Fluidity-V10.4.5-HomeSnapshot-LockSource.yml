@@ -49,9 +49,9 @@ jobs:
           patch=r'''
                   // V10.4.5 single-variable A/B: Home RuntimeSnapshot bytes = Lock RuntimeSnapshot bytes.
                   // Only applies to the registered 459C Celosia V3 descriptor package.
-                  if item.displayName == "iOS27-Fluidity-Add-V3-Registered" {
+                  if item.name == "iOS27-Fluidity-Add-V3-Registered" {
                       let rel = "Library/Application Support/PRBPosterExtensionDataStore/61/Extensions/com.apple.MercuryPoster/descriptors/459C311E-3615-4485-A24A-33A10CB3A3ED/versions/1"
-                      let base = containerDir.appendingPathComponent(rel)
+                      let base = containerStage.appendingPathComponent(rel)
                       let hash = "0f91499e0f52a02b0b8f9f8763e54d1888e6726469a887e9e78464ecd57c2d1d"
                       let home = base.appendingPathComponent("RuntimeSnapshot-\(hash)-home.atx")
                       let lock = base.appendingPathComponent("RuntimeSnapshot-\(hash)-lock.atx")
