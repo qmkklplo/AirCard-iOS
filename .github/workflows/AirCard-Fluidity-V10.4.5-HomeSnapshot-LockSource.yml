@@ -1,0 +1,124 @@
+name: AirCard Fluidity V10.4.5 HomeSnapshot LockSource A/B
+# trigger: fixed execution-path build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/AirCard-Fluidity-V10.4.5-HomeSnapshot-LockSource.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      IPA_NAME: AirCard-iOS-Fluidity-V10.4.5-HomeSnapshot-LockSource-ZH.ipa
+      BASE_WORKFLOW: .github/workflows/AirCard-Fluidity-V10.4-iOS18-Dynamic-HomeBlur.yml
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+
+      - name: Reuse V10.4 base only
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby <<'RB'
+          require 'yaml'
+          d = YAML.load_file(ENV.fetch('BASE_WORKFLOW'))
+          steps = d.fetch('jobs').fetch('build').fetch('steps')
+          step = steps.find { |x| x['name'] == 'Integrate V10 features' } or abort('Missing V10 base step')
+          File.write('/tmp/v10-base.sh', step.fetch('run'))
+          RB
+          bash /tmp/v10-base.sh
+
+      - name: Integrate Home Snapshot Lock-source A/B
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p=Path("ios-app/TendiesEngine.swift")
+          s=p.read_text()
+          # V3 container passthrough stages the descriptor tree locally before writeDirectoryTree.
+          # Copy lock ATX bytes over home ATX in that staged V3 tree; identifiers and filenames stay unchanged.
+          needle='''                log("  📦 V8 Container Tendie detected — preserving original paths and identifiers")'''
+          patch=r'''
+                  // V10.4.5 single-variable A/B: Home RuntimeSnapshot bytes = Lock RuntimeSnapshot bytes.
+                  // Only applies to the registered 459C Celosia V3 descriptor package.
+                  if item.displayName == "iOS27-Fluidity-Add-V3-Registered" {
+                      let rel = "Library/Application Support/PRBPosterExtensionDataStore/61/Extensions/com.apple.MercuryPoster/descriptors/459C311E-3615-4485-A24A-33A10CB3A3ED/versions/1"
+                      let base = containerDir.appendingPathComponent(rel)
+                      let hash = "0f91499e0f52a02b0b8f9f8763e54d1888e6726469a887e9e78464ecd57c2d1d"
+                      let home = base.appendingPathComponent("RuntimeSnapshot-\(hash)-home.atx")
+                      let lock = base.appendingPathComponent("RuntimeSnapshot-\(hash)-lock.atx")
+                      guard FileManager.default.fileExists(atPath: home.path),
+                            FileManager.default.fileExists(atPath: lock.path) else {
+                          throw NSError(domain: "TendiesEngine", code: 1045,
+                            userInfo: [NSLocalizedDescriptionKey: "V10.4.5 A/B requires both Home and Lock RuntimeSnapshot ATX files."])
+                      }
+                      let lockData = try Data(contentsOf: lock)
+                      try lockData.write(to: home, options: .atomic)
+                      log("🧪 V10.4.5 Snapshot Source A/B: Home ATX bytes replaced with Lock ATX bytes")
+                      log("🧪 UUID/path/filenames/HomeScreenConfiguration/active configuration unchanged")
+                  }
+          '''
+          if needle not in s: raise SystemExit("V8 passthrough anchor missing")
+          s=s.replace(needle,needle+"\n"+patch,1)
+          p.write_text(s)
+          body=p.read_text()
+          req=["V10.4.5 Snapshot Source A/B","RuntimeSnapshot-\\(hash)-home.atx","RuntimeSnapshot-\\(hash)-lock.atx","lockData.write(to: home"]
+          miss=[x for x in req if x not in body]
+          if miss: raise SystemExit("V10.4.5 integration missing: "+", ".join(miss))
+          print("Verified V10.4.5 Home ATX <- Lock ATX single-variable patch")
+          PY
+
+      - name: Build and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJ="$(find . -name '*.xcodeproj' -print -quit)"
+          test -n "$PROJ"
+          DIR="$(dirname "$PROJ")"; NAME="$(basename "$PROJ")"
+          SCHEME="$(cd "$DIR" && xcodebuild -project "$NAME" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("project",{}).get("schemes") or [""])[0])')"
+          test -n "$SCHEME"
+          cd "$DIR"
+          xcodebuild -project "$NAME" -scheme "$SCHEME" -configuration Release -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/AirCardV1045" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION=10.4.5 CURRENT_PROJECT_VERSION=1045 COMPILER_INDEX_STORE_ENABLE=NO build
+          APP="$(find "$RUNNER_TEMP/AirCardV1045/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 10.4.5' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 1045' "$APP/Info.plist"
+          cd "$GITHUB_WORKSPACE"
+          rm -rf Payload release && mkdir -p Payload release
+          cp -R "$APP" Payload/
+          zip -0qry "release/$IPA_NAME" Payload
+          shasum -a 256 "release/$IPA_NAME" | tee release/AirCard-V10.4.5-HomeSnapshot-LockSource-SHA256.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCard-iOS-Fluidity-V10.4.5-HomeSnapshot-LockSource-IPA
+          path: release/*
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="v10.4.5-homesnapshot-locksource"
+          TITLE="AirCard Fluidity V10.4.5 · Home Snapshot Lock-Source A/B"
+          NOTES="单变量 A/B：仅在刷入 iOS27-Fluidity-Add-V3-Registered 时，把 staged descriptor 中 Home RuntimeSnapshot ATX 的内容替换为 Lock RuntimeSnapshot ATX 内容；Home 文件名、UUID、路径、HomeScreenConfiguration 与 active configuration 均不改。用于判断主屏幕预览/组合是否消费 descriptor RuntimeSnapshot。"
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber --repo "$GH_REPO"
+          else
+            gh release create "$TAG" release/* --title "$TITLE" --notes "$NOTES" --repo "$GH_REPO"
+          fi
