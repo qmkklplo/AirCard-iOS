@@ -1,0 +1,565 @@
+name: AirCard Fluidity V10.4 iOS18 Fluidity Dynamic Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      IPA_NAME: AirCard-iOS-Fluidity-V10.4-iOS18-Dynamic-Test-ZH.ipa
+
+    steps:
+      - name: Checkout V8 source
+        uses: actions/checkout@v5
+
+      - name: Integrate V10 features
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          files = list(Path(".").rglob("*.swift"))
+
+          # V10.4: restore V8 true App Container passthrough before descriptor discovery/randomization.
+          engine = Path("ios-app/TendiesEngine.swift")
+          if not engine.exists():
+              raise SystemExit("TendiesEngine.swift not found")
+          es = engine.read_text()
+          if "V8 Container Tendie detected" not in es:
+              marker = '            log("  🖼 Locating wallpaper descriptors…")\n'
+              if marker not in es:
+                  raise SystemExit("V8 passthrough insertion marker not found; refusing to build stock descriptor path")
+              swift_lines = [
+                  '            // Fluidity V8: true Nugget-style container passthrough.',
+                  '            // Preserve container paths, UUIDs and semantic identifiers.',
+                  '            // Safety: refuse any container carrying PosterBoard SQLite database.',
+                  '            let containerStage = tempStageDir.appendingPathComponent("container")',
+                  '            if item.isContainer && FileManager.default.fileExists(atPath: containerStage.path) {',
+                  '                if item.unsafeContainer && item.name != "iOS27-Fluidity-Add-V3-Registered" {',
+                  '                    throw NSError(',
+                  '                        domain: "TendiesEngine",',
+                  '                        code: 27,',
+                  '                        userInfo: [NSLocalizedDescriptionKey: "Unsafe container Tendie refused: PosterBoard SQLite database is present."]',
+                  '                    )',
+                  '                }',
+                  '                if item.unsafeContainer {',
+                  '                    log("  Fluidity registration package authorized — writing paired PosterBoard DB snapshot")',
+                  '                }',
+                  '',
+                  '                log("  📦 V8 Container Tendie detected — preserving original paths and identifiers")',
+                  '                try await writeDirectoryTree(',
+                  '                    sourceBaseDir: containerStage,',
+                  '                    targetBaseDir: normalizedContainer,',
+                  '                    pairingPath: pairingPath,',
+                  '                    log: log',
+                  '                )',
+                  '                log("  ✅ V8 container tree injected without descriptor UUID/ID randomization")',
+                  '                progress(Double(itemIndex + 1) / (totalItems + 1))',
+                  '                continue',
+                  '            }',
+                  '',
+              ]
+              v8patch = "\n".join(swift_lines) + "\n"
+              es = es.replace(marker, v8patch + marker, 1)
+              engine.write_text(es)
+
+          es = engine.read_text()
+          required = ["V8 Container Tendie detected", "sourceBaseDir: containerStage", "targetBaseDir: normalizedContainer", "Unsafe container Tendie refused", "Fluidity registration package authorized"]
+          missing = [x for x in required if x not in es]
+          if missing:
+              raise SystemExit("V8 passthrough verification failed: " + ", ".join(missing))
+          print("Patched: ios-app/TendiesEngine.swift — V8 App Container passthrough VERIFIED")
+
+          vm = next((p for p in files if "flashTendies" in p.read_text(errors="ignore") and "triggerNeoSpring" in p.read_text(errors="ignore")), None)
+          if vm is None:
+              raise SystemExit("Could not locate flashTendies view-model")
+          s = vm.read_text()
+
+          anchor = '@Published var isNeoSpringing: Bool = false'
+          if "autoNeoSpringAfterFlash" not in s:
+              if anchor not in s:
+                  raise SystemExit("isNeoSpringing anchor missing")
+              setting = """
+              @Published var autoNeoSpringAfterFlash: Bool = UserDefaults.standard.object(forKey: "aircard.v10.auto_neospring") as? Bool ?? false {
+                  didSet {
+                      UserDefaults.standard.set(autoNeoSpringAfterFlash, forKey: "aircard.v10.auto_neospring")
+                  }
+              }
+              """
+              s = s.replace(anchor, anchor + setting, 1)
+
+          if "V10 Auto NeoSpring is OFF" not in s:
+              pattern = re.compile(
+                  r'(?P<indent>[ \t]*)tendiesFlashLog\.append\("🎉 Wallpapers applied successfully!"\)\s*'
+                  r'tendiesFlashLog\.append\("⚡ Triggering NeoSpring respring\.\.\."\)\s*'
+                  r'DispatchQueue\.main\.asyncAfter\(deadline: \.now\(\) \+ 0\.6\) \{ \[weak self\] in\s*'
+                  r'self\?\.isNeoSpringing = true\s*'
+                  r'RespringHelper\.triggerNeoSpring\(\)\s*\}',
+                  re.M
+              )
+              m = pattern.search(s)
+              if not m:
+                  raise SystemExit("Automatic NeoSpring block not found")
+              i = m.group("indent")
+              replacement = (
+                  i + 'tendiesFlashLog.append("🎉 Wallpapers applied successfully!")\n'
+                  + i + 'if autoNeoSpringAfterFlash {\n'
+                  + i + '    tendiesFlashLog.append("⚡ V10 Auto NeoSpring is ON — triggering respring...")\n'
+                  + i + '    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in\n'
+                  + i + '        self?.isNeoSpringing = true\n'
+                  + i + '        RespringHelper.triggerNeoSpring()\n'
+                  + i + '    }\n'
+                  + i + '} else {\n'
+                  + i + '    tendiesFlashLog.append("🧪 V10 Auto NeoSpring is OFF — complete flash log preserved. Use manual Respring when ready.")\n'
+                  + i + '}'
+              )
+              s = s[:m.start()] + replacement + s[m.end():]
+          vm.write_text(s)
+          print("Patched:", vm)
+
+          view = next((p for p in files if 'Respring (NeoSpring)' in p.read_text(errors="ignore")), None)
+          if view is None:
+              raise SystemExit("Wallpapers view not found")
+          v = view.read_text()
+
+          if "Auto NeoSpring After Flash" not in v:
+              marker = "// Section 3: Wallpapers Gallery"
+              pos = v.find(marker)
+              if pos < 0:
+                  raise SystemExit("Wallpapers Gallery marker not found")
+              line_start = v.rfind("\n", 0, pos) + 1
+              i = v[line_start:pos]
+              toggle = (
+                  i + 'Section {\n'
+                  + i + '    Toggle(isOn: $vm.autoNeoSpringAfterFlash) {\n'
+                  + i + '        VStack(alignment: .leading, spacing: 2) {\n'
+                  + i + '            Text("Auto NeoSpring After Flash")\n'
+                  + i + '                .font(.subheadline.bold())\n'
+                  + i + '            Text("OFF keeps AirCard open and preserves the complete flash log.")\n'
+                  + i + '                .font(.caption)\n'
+                  + i + '                .foregroundStyle(.secondary)\n'
+                  + i + '        }\n'
+                  + i + '    }\n'
+                  + i + '}\n\n'
+              )
+              v = v[:line_start] + toggle + v[line_start:]
+
+          cache_pos = v.find("Force PosterBoard Cache Refresh")
+          auto_pos = v.find("Auto NeoSpring After Flash")
+          gallery_pos = v.find("// Section 3: Wallpapers Gallery")
+          if not (0 <= cache_pos < auto_pos < gallery_pos):
+              raise SystemExit("V10.2 UI placement verification failed")
+
+          v = v.replace(
+              'Text("Flashing will automatically trigger NeoSpring to respring the device and apply your new wallpapers.")',
+              'EmptyView()'
+          )
+          view.write_text(v)
+          print("Patched:", view)
+
+          # V10.3 Simplified Chinese UI localization.
+          # Only user-visible Swift string literals are translated.
+          translations = {
+              # App name "AirCard-iOS" is intentionally NOT translated.
+              "Pairing": "配对", "Wallet Cards": "钱包卡片", "Passcode": "密码", "Wallpapers": "壁纸",
+              "Credits": "致谢", "Network": "网络", "Active Pairing": "当前配对", "Pair on This iPhone": "在此 iPhone 上配对",
+              "Loopback VPN Active": "回环 VPN 已连接", "Loopback VPN Not Detected": "未检测到回环 VPN",
+              "RSD tunnel ready — exploit will connect.": "RSD 隧道已就绪 — 可建立连接。",
+              "Not Paired": "未配对", "Tap 'Pair This iPhone' below to pair.": "点击下方“配对此 iPhone”开始配对。",
+              "Pair This iPhone": "配对此 iPhone", "Re-Pair This iPhone": "重新配对此 iPhone", "Cancel Pairing": "取消配对",
+              "Paired successfully! ✅": "配对成功！✅", "Pairing file deleted": "配对文件已删除",
+              "Device IP:": "设备 IP：", "Ready to exploit ✅": "连接已就绪 ✅",
+              "Apply custom wallet card skins and passcode themes on-device using the AirTraffic sandbox escape.": "使用 AirTraffic 沙盒逃逸直接在设备上应用自定义钱包卡片皮肤和密码主题。",
+              "Scan Cards": "扫描卡片", "Stop Scan": "停止扫描", "Wallet Cards": "钱包卡片",
+              "No Cards Detected Yet": "尚未检测到卡片", "Tap **Scan Cards** in the toolbar above.": "点击上方工具栏中的“扫描卡片”。",
+              "On this iPhone, **double-click the Side button** (Apple Pay), authenticate with **Face ID**, and **tap your card**.": "在此 iPhone 上，连按两下侧边按钮（Apple Pay），使用 Face ID 验证，然后点击你的卡片。",
+              "Your card will appear here automatically!": "你的卡片会自动显示在这里！", "Add Manually": "手动添加",
+              "Add Card Manually": "手动添加卡片", "Add Card": "添加卡片", "Clear All Cards": "清除所有卡片",
+              "Open Apple Pay (double-click Side button) and tap your card…": "打开 Apple Pay（连按两下侧边按钮）并点击你的卡片…",
+              "Live Scanner Active": "实时扫描已开启", "Scanner Status": "扫描状态", "Card Hash": "卡片哈希",
+              "Assign Card Skin": "分配卡片皮肤", "Set Skin for All Cards...": "为所有卡片设置皮肤…",
+              "Passcode Theme": "密码主题", "Passcode Themes": "密码主题", "Apply .passthm": "应用 .passthm",
+              "Create Theme": "创建主题", "Browse Files": "浏览文件", "Choose .passthm from Files…": "从文件选择 .passthm…",
+              "Change .passthm…": "更换 .passthm…", "Theme Information": "主题信息", "Files in theme": "主题中的文件",
+              "Edit in Theme Creator": "在主题创建器中编辑", "Remove / Unload Theme": "移除 / 卸载主题",
+              "Flash Theme to iPhone": "将主题刷入 iPhone", "Flashing Theme…": "正在刷入主题…", "Retry Flash Theme": "重新刷入主题",
+              "Create Theme": "创建主题", "Interactive Lock Screen Preview": "交互式锁屏预览", "Choose Image Source": "选择图像来源",
+              "Choose Poster Image Source": "选择海报图像来源", "Photo Library": "照片图库", "Choose from Files…": "从文件选择…",
+              "Suggested Photos": "推荐照片", "Poster Image": "海报图像", "Preview": "预览", "Zoom & Framing": "缩放与构图",
+              "Slicing Style": "切片样式", "Circle Buttons": "圆形按键", "Seamless Poster": "无缝海报", "Individual Keys": "独立按键",
+              "Drag preview to reposition": "拖动预览以调整位置", "Drag anywhere on the dialer preview to reposition": "拖动拨号盘预览任意位置以调整位置",
+              "Reset Position": "重置位置", "Tap to choose photo": "点击选择照片", "Select Photo for Keypad…": "为键盘选择照片…",
+              "Export .passthm...": "导出 .passthm…", "Flash & Language Target": "刷入与语言目标", "System Language": "系统语言",
+              "All Languages (Universal)": "所有语言（通用）", "Universal (All)": "通用（全部）", "Universal (Regular + Bold)": "通用（常规 + 粗体）",
+              "Font Weight / Style": "字体粗细 / 样式", "Regular Font Only (Fast)": "仅常规字体（快速）", "Bold Text Only (Fast)": "仅粗体（快速）",
+              "Wallpaper": "壁纸", "Wallpapers Gallery": "壁纸库", "Import More Wallpapers…": "导入更多壁纸…",
+              "Choose .tendies from Files…": "从文件选择 .tendies…", "PosterBoard container will be auto-detected automatically on flash.": "刷入时将自动检测 PosterBoard 容器。",
+              "Force PosterBoard Cache Refresh": "强制刷新 PosterBoard 缓存", "Resets file protections so iOS re-indexes wallpapers immediately": "重置文件保护，使 iOS 立即重新索引壁纸",
+              "Auto NeoSpring After Flash": "刷入后自动 NeoSpring", "OFF keeps AirCard open and preserves the complete flash log.": "关闭后保持 AirCard 运行，并保留完整刷入日志。",
+              "Deselect All": "取消全选", "Select All": "全选", "No .tendies wallpapers loaded yet": "尚未载入 .tendies 壁纸",
+              "Tap 'Choose .tendies from Files' or copy wallpapers into On My iPhone › AirCard-iOS.": "点击“从文件选择 .tendies”，或将壁纸复制到“我的 iPhone › AirCard-iOS”。",
+              "Flashing Wallpapers…": "正在刷入壁纸…", "Flashing…": "正在刷入…", "Respring (NeoSpring)": "重启桌面（NeoSpring）",
+              "Imported": "已导入", "App Container": "App 容器", "Descriptor Archive": "描述符归档", "Descriptor": "描述符", "Descriptors": "描述符",
+              "Target Extension": "目标扩展", "Format": "格式", "Name": "名称", "Type": "类型", "Information": "信息",
+              "Close": "关闭", "Done": "完成", "Cancel": "取消", "Delete": "删除", "Clear": "清除", "Clear All": "全部清除",
+              "Error": "错误", "Warning": "警告", "Notice": "提示", "Success! 🎉": "成功！🎉", "Retry": "重试", "Load": "载入", "Copy": "复制", "Copied": "已复制",
+              "Cancelled": "已取消", "Cancelled.": "已取消。", "OK": "好", "Stop": "停止", "Add": "添加",
+              "Setup LocalDevVPN:": "设置 LocalDevVPN：", "Launch LocalDevVPN": "打开 LocalDevVPN", "Open Settings App Now": "立即打开设置",
+              "1. Open LocalDevVPN app and tap Connect.": "1. 打开 LocalDevVPN 并点击连接。",
+              "2. Return to AirCard-iOS — status indicator turns green.": "2. 返回 AirCard-iOS — 状态指示器会变为绿色。",
+              "Connect LocalDevVPN before running flashes.": "刷入前请先连接 LocalDevVPN。",
+              "Local Network permission is off. Enable it in Settings › AirCard-iOS › Local Network.": "本地网络权限已关闭。请前往“设置 › AirCard-iOS › 本地网络”开启。",
+              "Failed to find PosterBoard container": "未找到 PosterBoard 容器", "PosterBoard Container path is required.": "需要 PosterBoard 容器路径。",
+              "PosterBoard container could not be found automatically. Ensure LocalDevVPN is connected and iPhone is unlocked.": "无法自动找到 PosterBoard 容器。请确认 LocalDevVPN 已连接且 iPhone 已解锁。",
+              "No wallpapers selected to flash.": "未选择要刷入的壁纸。", "No wallpapers found": "未找到壁纸",
+              "Flashing will automatically trigger NeoSpring to respring the device and apply your new wallpapers.": "刷入完成后将自动触发 NeoSpring 重启桌面并应用新壁纸。",
+              "Target: PosterBoard container detected ✅": "目标：已检测到 PosterBoard 容器 ✅",
+              "Apple Wallet Skins & Passcode Themes for iOS 18+": "适用于 iOS 18+ 的 Apple 钱包皮肤与密码主题",
+              "Lead & Core Developer": "主要与核心开发者", "Base IPA Developer": "基础 IPA 开发者", "Core Exploit": "核心漏洞利用",
+          }
+
+          # Translate exact Swift string literals only. This avoids touching
+          # identifiers, bundle IDs, AirLift protocol strings and file formats.
+          for swift_file in Path(".").rglob("*.swift"):
+              text = swift_file.read_text(errors="ignore")
+              original_text = text
+              for en, zh in translations.items():
+                  text = text.replace('"' + en + '"', '"' + zh + '"')
+              # Localize interpolated/dynamic UI strings that exact literal replacement cannot catch.
+              text = re.sub(r'"Wallet Cards \(\(cards\.count\)\)"', '"钱包卡片 (\(cards.count))"', text)
+              text = re.sub(r'"\(\(importedTendies\.count\)\) Wallpapers Imported"', '"已导入 \(importedTendies.count) 个壁纸"', text)
+              text = re.sub(r'"\(\(importedTendies\.count\)\) Wallpaper Imported"', '"已导入 \(importedTendies.count) 个壁纸"', text)
+              text = re.sub(r'"Flash \(\(selectedCount\)\) Wallpaper"', '"刷入 \(selectedCount) 个壁纸"', text)
+              text = re.sub(r'"Flash \(\(selectedCount\)\) Wallpapers"', '"刷入 \(selectedCount) 个壁纸"', text)
+              text = re.sub(r'"Flash \(\(selected\.count\)\) Wallpaper"', '"刷入 \(selected.count) 个壁纸"', text)
+              text = re.sub(r'"Flash \(\(selected\.count\)\) Wallpapers"', '"刷入 \(selected.count) 个壁纸"', text)
+              # Broader safe UI-only substitutions for labels seen in the app.
+              text = text.replace('"Wallet Cards (\(cards.count))"', '"钱包卡片 (\(cards.count))"')
+              text = text.replace('"\(importedTendies.count) Wallpapers Imported"', '"已导入 \(importedTendies.count) 个壁纸"')
+              text = text.replace('"\(importedTendies.count) Wallpaper Imported"', '"已导入 \(importedTendies.count) 个壁纸"')
+              if text != original_text:
+                  swift_file.write_text(text)
+                  print("Localized:", swift_file)
+
+          # V10.4: make the two wallpaper setting sections use system blue.
+          # Localization has already run, so use the final Chinese labels.
+          # Apply tint to the enclosing Section rather than inserting a modifier
+          # into the middle of a Toggle expression.
+          def tint_enclosing_section(source, label):
+              label_pos = source.find(label)
+              if label_pos < 0:
+                  raise SystemExit(f"Wallpaper setting label not found: {label}")
+              section_pos = source.rfind("Section {", 0, label_pos)
+              if section_pos < 0:
+                  raise SystemExit(f"Section start not found for: {label}")
+              brace_pos = source.find("{", section_pos)
+              depth = 0
+              in_string = False
+              escape = False
+              end_pos = None
+              for idx in range(brace_pos, len(source)):
+                  ch = source[idx]
+                  if in_string:
+                      if escape:
+                          escape = False
+                      elif ch == "\\":
+                          escape = True
+                      elif ch == '"':
+                          in_string = False
+                      continue
+                  if ch == '"':
+                      in_string = True
+                      continue
+                  if ch == "{":
+                      depth += 1
+                  elif ch == "}":
+                      depth -= 1
+                      if depth == 0:
+                          end_pos = idx + 1
+                          break
+              if end_pos is None:
+                  raise SystemExit(f"Section end not found for: {label}")
+              if re.match(r'\s*\.tint\(\.blue\)', source[end_pos:end_pos + 80]):
+                  return source
+              line_start = source.rfind("\n", 0, section_pos) + 1
+              indent = re.match(r"^[ \t]*", source[line_start:section_pos]).group(0)
+              return source[:end_pos] + "\n" + indent + ".tint(.blue)" + source[end_pos:]
+
+          wallpaper_file = next((p for p in Path(".").rglob("*.swift") if "强制刷新 PosterBoard 缓存" in p.read_text(errors="ignore") and "刷入后自动 NeoSpring" in p.read_text(errors="ignore")), None)
+          if wallpaper_file is None:
+              raise SystemExit("Localized wallpaper settings file not found")
+          blue_text = wallpaper_file.read_text()
+          blue_text = tint_enclosing_section(blue_text, "强制刷新 PosterBoard 缓存")
+          blue_text = tint_enclosing_section(blue_text, "刷入后自动 NeoSpring")
+          wallpaper_file.write_text(blue_text)
+          print("Applied blue tint to wallpaper setting sections:", wallpaper_file)
+
+          pbx = next(Path(".").rglob("project.pbxproj"), None)
+          if pbx is None:
+              raise SystemExit("project.pbxproj not found")
+          x = pbx.read_text()
+          x, a = re.subn(r'MARKETING_VERSION\s*=\s*[^;]+;', 'MARKETING_VERSION = 10.4;', x)
+          x, b = re.subn(r'CURRENT_PROJECT_VERSION\s*=\s*[^;]+;', 'CURRENT_PROJECT_VERSION = 1040;', x)
+          if not a or not b:
+              raise SystemExit("Version fields not found")
+          pbx.write_text(x)
+
+          # Final guard: reject stale version literals before compilation.
+          stale = ["10.3.6", "1036", "AirCardV1036"]
+          leftovers = [token for token in stale if token in pbx.read_text()]
+          if leftovers:
+              raise SystemExit("Stale version literals remain in project: " + ", ".join(leftovers))
+
+          print("V10.4 Fluidity Registration integration complete")
+          PY
+
+      - name: Apply iOS 18 Fluidity dynamic test code
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          engine = Path("ios-app/TendiesEngine.swift")
+          if not engine.exists():
+              raise SystemExit("TendiesEngine.swift not found")
+          s = engine.read_text()
+
+          helper = r'''
+    // MARK: - iOS 18 Fluidity Dynamic Test Code
+
+    private func applyIOS18FluidityDynamicTestCode(
+        in folderURL: URL,
+        log: @escaping (String) -> Void
+    ) {
+        let fm = FileManager.default
+        var patchedUserInfo = 0
+        var patchedIdentifier = false
+
+        let identifierURL = folderURL.appendingPathComponent("com.apple.posterkit.provider.descriptor.identifier")
+        if fm.fileExists(atPath: identifierURL.path) {
+            if let data = "fluidity.dynamic".data(using: .utf8) {
+                try? data.write(to: identifierURL, options: .atomic)
+                patchedIdentifier = true
+            }
+        }
+
+        if let enumerator = fm.enumerator(
+            at: folderURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            while let fileURL = enumerator.nextObject() as? URL {
+                guard fileURL.lastPathComponent == "com.apple.posterkit.provider.contents.userInfo" else { continue }
+                guard let data = try? Data(contentsOf: fileURL),
+                      var plist = (try? PropertyListSerialization.propertyList(
+                          from: data,
+                          options: .mutableContainers,
+                          format: nil
+                      )) as? [String: Any] else { continue }
+
+                plist["appearanceMode"] = "Automatic"
+                plist["lookIdentifier"] = "dynamic"
+
+                if let out = try? PropertyListSerialization.data(
+                    fromPropertyList: plist,
+                    format: .binary,
+                    options: 0
+                ) {
+                    try? out.write(to: fileURL, options: .atomic)
+                    patchedUserInfo += 1
+                }
+            }
+        }
+
+        log("    🧪 iOS 18 Fluidity test code: descriptor=fluidity.dynamic, appearanceMode=Automatic, lookIdentifier=dynamic")
+        log("    🧪 Fluidity test patch results: descriptorIdentifier=\(patchedIdentifier ? \"patched\" : \"not present\"), userInfo=\(patchedUserInfo)")
+    }
+
+'''
+          marker = "    // MARK: - Plist Identifier Randomization (Matches Nugget implementation)\n"
+          if "applyIOS18FluidityDynamicTestCode" not in s:
+              if marker not in s:
+                  raise SystemExit("Fluidity helper insertion marker not found")
+              s = s.replace(marker, helper + marker, 1)
+
+          call_anchor = "                // Update plist identifiers to ensure unique indexing without collisions\n                updatePlistIdentifiers(in: descItem.url, randomizedID: randomizedID)"
+          replacement = '''                // iOS 18 Fluidity dynamic test code — MercuryPoster only.
+                if descItem.ext == "com.apple.MercuryPoster" {
+                    applyIOS18FluidityDynamicTestCode(in: descItem.url, log: log)
+                }
+
+                // Update plist identifiers to ensure unique indexing without collisions.
+                updatePlistIdentifiers(in: descItem.url, randomizedID: randomizedID)'''
+          if "iOS 18 Fluidity dynamic test code — MercuryPoster only" not in s:
+              if call_anchor not in s:
+                  raise SystemExit("Descriptor identifier handling anchor not found")
+              s = s.replace(call_anchor, replacement, 1)
+
+          engine.write_text(s)
+          body = engine.read_text()
+          required = [
+              "applyIOS18FluidityDynamicTestCode",
+              "fluidity.dynamic",
+              'plist["appearanceMode"] = "Automatic"',
+              'plist["lookIdentifier"] = "dynamic"',
+              'descItem.ext == "com.apple.MercuryPoster"',
+          ]
+          missing = [x for x in required if x not in body]
+          if missing:
+              raise SystemExit("iOS 18 Fluidity dynamic test integration failed: " + ", ".join(missing))
+          print("iOS 18 Fluidity dynamic test code integrated")
+          PY
+
+      - name: Integrate iOS 27 Home Screen Blur control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          CONFIG_UUID = '8A50B665-CEDE-436F-880B-9B2314B79105'
+          ENGINE_METHOD = '\n    // MARK: - Fluidity iOS 27 Home Screen Blur\n\n    public func setFluidityHomeScreenBlur(\n        enabled: Bool,\n        containerPath: String,\n        pairingPath: String,\n        log: @escaping (String) -> Void\n    ) async throws {\n        let configUUID = "8A50B665-CEDE-436F-880B-9B2314B79105"\n        let supplementRevision = "4"\n        let fileName = "com.apple.posterkit.provider.supplementURL.homescreenConfiguration.plist"\n        let encoded = enabled ? Self.fluidityHomeBlurOnB64 : Self.fluidityHomeBlurOffB64\n        guard let plistData = Data(base64Encoded: encoded) else {\n            throw NSError(domain: "TendiesEngine", code: 1041, userInfo: [NSLocalizedDescriptionKey: "Embedded Home Screen Blur plist is invalid."])\n        }\n\n        var normalizedContainer = containerPath.trimmingCharacters(in: .whitespacesAndNewlines)\n        if normalizedContainer.hasSuffix("/") {\n            normalizedContainer = String(normalizedContainer.dropLast())\n        }\n        guard !normalizedContainer.isEmpty else {\n            throw NSError(domain: "TendiesEngine", code: 1042, userInfo: [NSLocalizedDescriptionKey: "PosterBoard container path is required."])\n        }\n\n        let stageDir = FileManager.default.temporaryDirectory\n            .appendingPathComponent("fluidity_home_blur_\\(UUID().uuidString)")\n        try FileManager.default.createDirectory(at: stageDir, withIntermediateDirectories: true)\n        defer { try? FileManager.default.removeItem(at: stageDir) }\n\n        let plistURL = stageDir.appendingPathComponent(fileName)\n        try plistData.write(to: plistURL, options: .atomic)\n\n        let targetDir = "\\(normalizedContainer)/Library/Application Support/PRBPosterExtensionDataStore/61/Extensions/com.apple.MercuryPoster/configurations/\\(configUUID)/versions/0/supplements/\\(supplementRevision)"\n        log("🌫 Applying iOS 27 Home Screen Blur = \\(enabled ? "ON" : "OFF")")\n        try await writeDirectoryTree(\n            sourceBaseDir: stageDir,\n            targetBaseDir: targetDir,\n            pairingPath: pairingPath,\n            log: log\n        )\n        log("✅ Home Screen Blur supplement written successfully")\n    }\n\n    private static let fluidityHomeBlurOnB64 = "YnBsaXN0MDDUAAEAAgADAAQABQAGAAcAClgkdmVyc2lvblkkYXJjaGl2ZXJUJHRvcFgkb2JqZWN0cxIAAYagXxAPTlNLZXllZEFyY2hpdmVy0QAIAAlUcm9vdIABrxB6AAsADAAbACEAKQAvAD8AQABBAEsAYQBsAG0AcQB2AIwAFQCSAJYAnQCeAKEApgCtAK4AsQC6AMEAwgDFAM4A1QDWANkA4gDpAOoA7QDyAPkA+gD9AQQBCwEMAQ8BFQEcAR0BIAEnAS4BLwEyATkBQAFBAUQBTQFUAVUBWAFhAWgBaQFsAXIBeQF6AX0BgwGKAYsBjgGUAZsBnAGfAaUBrAGtAbABuQG6AcEBwgHFAcoBywHOAc8AiQHTAdcB3AHgAekB6gHwAgUCCgIOAhMCJQIzAjQCNQI2AjcCPAI9Aj4CPwJAAk0CTgJPAlACUQJSAlUCWVUkbnVsbNcADQAOAA8AEAARABIAEwAUABUAFgAXABgAGQAaViRjbGFzc18QFnNlbGVjdGVkQXBwZWFyYW5jZVR5cGVfEBRob21lUG9zdGVyQXBwZWFyYW5jZV8QEmdyYWRpZW50QXBwZWFyYW5jZV8QFGxvY2tQb3N0ZXJBcHBlYXJhbmNlXxAaY3VzdG9taXphdGlvbkNvbmZpZ3VyYXRpb25fEBRzb2xpZENvbG9yQXBwZWFyYW5jZYB5EACAZIBegAKAZoAE0wAcAA0AHQAeAB8AHl8QHWFsbG93c01vZGlmeWluZ0xlZ2liaWxpdHlCbHVyXxAVbGVnaWJpbGl0eUJsdXJFbmFibGVkCYADCdIAIgAjACQAJVokY2xhc3NuYW1lWCRjbGFzc2VzXxAmUFJQb3N0ZXJMb2NrUG9zdGVySG9tZVNjcmVlbkFwcGVhcmFuY2WjACYAJwAoXxAmUFJQb3N0ZXJMb2NrUG9zdGVySG9tZVNjcmVlbkFwcGVhcmFuY2VfEBxQUlBvc3RlckhvbWVTY3JlZW5BcHBlYXJhbmNlWE5TT2JqZWN00wAqACsADQAsAC0ALlVjb2xvcl8QGGNvbG9yUGlja2VyQ29uZmlndXJhdGlvboAAgAWAXdgAMAANADEAMgAzADQANQA2ADcAOAA5ADoAHgA8ACwAPlZwcm9tcHRfEBRjb2xvcldlbGxEaXNwbGF5TW9kZVdjb250ZXh0W3Nob3dzU2xpZGVyWmlkZW50aWZpZXJdc2VsZWN0ZWRDb2xvcldwYWxldHRlgAeAXIBbgBAJgAaAAIAIXxAZc29saWRIb21lU2NyZWVuQXBwZWFyYW5jZWSAzGZvmJyCctUADQBCAEMARABFAEYARwBIAEkALFZjb2xvcnNbcGFsZXR0ZVR5cGVfEBRpbmNsdWRlc1Bvc3RlckNvbG9yc11sb2NhbGl6ZWROYW1lgFqACYBZCIAA0gBMAA0ATQBgWk5TLm9iamVjdHOvEBIATgBPAFAAUQBSAFMAVABVAFYAVwBYAFkAWgBbAFwAXQBeAF+ACoASgBaAGoAegCKAJoAqgC6AMoA2gDqAPoBCgEaASoBOgFOAWNYAYgANAGMANABkAGUAOgBnAGgAaQBJAGtecHJlZmVycmVkU3R5bGVZY29sb3JEYXRhWXN1Z2dlc3RlZFVjb2xvcoAQgBGADIALCIAOXxAkZGVmYXVsdC0wLjUzNzI1OjAuOTY1OTE6MC42NTQ5MDoxLjAw0gBuAA0AbwBwV05TLmRhdGFPEQHzYnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJG9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCwwjVSRudWxs2w0ODxAREhMUFRYXGBkaGxwdHh8gISJfEBVVSUNvbG9yQ29tcG9uZW50Q291bnRXVUlHcmVlblZVSUJsdWVdVUlCbHVlLURvdWJsZVdVSUFscGhhVU5TUkdCXFVJUmVkLURvdWJsZVVVSVJlZFxOU0NvbG9yU3BhY2VWJGNsYXNzXlVJR3JlZW4tRG91YmxlEAQiP1bW1yI/fPz9Iz/vn5+fn5+gIj+AAABPEBEwLjMyMiAwLjgzOSAwLjk4OCM/1JSUlJSUlSI+pKSlEAKAAiM/6tra2tra29MkJSYnKCpaJGNsYXNzbmFtZVgkY2xhc3Nlc1skY2xhc3NoaW50c1dVSUNvbG9yoicpWE5TT2JqZWN0oStXTlNDb2xvcgAIABEAGgAkACkAMgA3AEkATABRAFMAVwBdAHQAjACUAJsAqQCxALcAxADKANcA3gDtAO8A9AD5AQIBBwEbASQBKQErAS0BNgE9AUgBUQFdAWUBaAFxAXMAAAAAAAACAQAAAAAAAAAsAAAAAAAAAAAAAAAAAAABe4AN0gAiACMAcgBzXU5TTXV0YWJsZURhdGGjAHQAdQAoXU5TTXV0YWJsZURhdGFWTlNEYXRh2wB3AHgAeQB6AHsAfAB9AH4AfwANAIAAgQCCAIMAhACFAIYAhwCIAIkAigCLXxAVVUlDb2xvckNvbXBvbmVudENvdW50V1VJR3JlZW5WVUlCbHVlXVVJQmx1ZS1Eb3VibGVXVUlBbHBoYVVOU1JHQlxVSVJlZC1Eb3VibGVVVUlSZWRcTlNDb2xvclNwYWNlXlVJR3JlZW4tRG91YmxlEAQiP1bW1yI/fPz9Iz/vn5+fn5+gIj+AAABPEBEwLjMyMiAwLjgzOSAwLjk4OCM/1JSUlJSUlSI+pKSlEAKADyM/6tra2tra29MAIgAjAI0AjgCPAJBbJGNsYXNzaGludHNXVUlDb2xvcqIAjgAooQCRV05TQ29sb3LSACIAIwCTAJRdUFJQb3N0ZXJDb2xvcqIAlQAoXVBSUG9zdGVyQ29sb3LWAGIADQBjADQAZABlADoAZwCZAJoASQCcgBCAEYAUgBMIgBVfECRkZWZhdWx0LTAuNjA1MDE6MS4wMDAwMDowLjcyNzAwOjEuMDDSAG4ADQCfAHBPEQGPYnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJG9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCwwcVSRudWxs2A0ODxAREhMUFRYXFxgZGhtfEBVVSUNvbG9yQ29tcG9uZW50Q291bnRXVUlHcmVlblZVSUJsdWVXVUlBbHBoYVVOU1JHQlYkY2xhc3NVVUlSZWRcTlNDb2xvclNwYWNlEAQiPyfvniI/gAAATTAuNDU0IDAuNjU2IDGAAiI+6HKwEALTHR4fICEjWiRjbGFzc25hbWVYJGNsYXNzZXNbJGNsYXNzaGludHNXVUlDb2xvcqIgIlhOU09iamVjdKEkV05TQ29sb3IACAARABoAJAApADIANwBJAEwAUQBTAFcAXQBuAIYAjgCVAJ0AowCqALAAvQC/AMQAyQDXANkA3gDgAOcA8gD7AQcBDwESARsBHQAAAAAAAAIBAAAAAAAAACUAAAAAAAAAAAAAAAAAAAElgA3YAHcAeAB5AHsAfAANAH4AfwCBAKIAhQCFAKMAigClAIkiPyfvnk0wLjQ1NCAwLjY1NiAxgA8iPuhysNYAYgANAGMANABkAGUAOgBnAKkAqgBJAKyAEIARgBiAFwiAGV8QJGRlZmF1bHQtMC43MjA3NjowLjk4Mjc2OjAuNzcyNTU6MS4wMNIAbgANAK8AcE8RAfNicGxpc3QwMNQBAgMEBQYHClgkdmVyc2lvblkkYXJjaGl2ZXJUJHRvcFgkb2JqZWN0cxIAAYagXxAPTlNLZXllZEFyY2hpdmVy0QgJVHJvb3SAAaMLDCNVJG51bGzbDQ4PEBESExQVFhcYGRobHB0eHyAhIl8QFVVJQ29sb3JDb21wb25lbnRDb3VudFdVSUdyZWVuVlVJQmx1ZV1VSUJsdWUtRG91YmxlV1VJQWxwaGFVTlNSR0JcVUlSZWQtRG91YmxlVVVJUmVkXE5TQ29sb3JTcGFjZVYkY2xhc3NeVUlHcmVlbi1Eb3VibGUQBCI/DIyNIj9+/v8jP+/f39/f3+AiP4AAAE8QETAuNjk0IDAuNTQ5IDAuOTk2Iz/mNjY2NjY2Ij8xsbIQAoACIz/hkZGRkZGS0yQlJicoKlokY2xhc3NuYW1lWCRjbGFzc2VzWyRjbGFzc2hpbnRzV1VJQ29sb3KiJylYTlNPYmplY3ShK1dOU0NvbG9yAAgAEQAaACQAKQAyADcASQBMAFEAUwBXAF0AdACMAJQAmwCpALEAtwDEAMoA1wDeAO0A7wD0APkBAgEHARsBJAEpASsBLQE2AT0BSAFRAV0BZQFoAXEBcwAAAAAAAAIBAAAAAAAAACwAAAAAAAAAAAAAAAAAAAF7gA3bAHcAeAB5AHoAewB8AH0AfgB/AA0AgACBALIAswC0AIUAtQC2ALcAiQCKALkiPwyMjSI/fv7/Iz/v39/f39/gTxARMC42OTQgMC41NDkgMC45OTYjP+Y2NjY2NjYiPzGxsoAPIz/hkZGRkZGS1gBiAA0AYwA0AGQAZQA6AGcAvQC+AEkAwIAQgBGAHIAbCIAdXxAkZGVmYXVsdC0wLjc5MDQyOjAuOTg4MTc6MC42Njg2MzoxLjAw0gBuAA0AwwBwTxEB82JwbGlzdDAw1AECAwQFBgcKWCR2ZXJzaW9uWSRhcmNoaXZlclQkdG9wWCRvYmplY3RzEgABhqBfEA9OU0tleWVkQXJjaGl2ZXLRCAlUcm9vdIABowsMI1UkbnVsbNsNDg8QERITFBUWFxgZGhscHR4fICEiXxAVVUlDb2xvckNvbXBvbmVudENvdW50V1VJR3JlZW5WVUlCbHVlXVVJQmx1ZS1Eb3VibGVXVUlBbHBoYVVOU1JHQlxVSVJlZC1Eb3VibGVVVUlSZWRcTlNDb2xvclNwYWNlViRjbGFzc15VSUdyZWVuLURvdWJsZRAEIj6urq8iP37+/yM/79/f39/f4CI/gAAATxARMC44MjcgMC4zNDEgMC45OTYjP+p6enp6enoiP1PT1BACgAIjP9XV1dXV1dbTJCUmJygqWiRjbGFzc25hbWVYJGNsYXNzZXNbJGNsYXNzaGludHNXVUlDb2xvcqInKVhOU09iamVjdKErV05TQ29sb3IACAARABoAJAApADIANwBJAEwAUQBTAFcAXQB0AIwAlACbAKkAsQC3AMQAygDXAN4A7QDvAPQA+QECAQcBGwEkASkBKwEtATYBPQFIAVEBXQFlAWgBcQFzAAAAAAAAAgEAAAAAAAAALAAAAAAAAAAAAAAAAAAAAXuADdsAdwB4AHkAegB7AHwAfQB+AH8ADQCAAIEAxgDHAMgAhQDJAMoAywCJAIoAzSI+rq6vIj9+/v8jP+/f39/f3+BPEBEwLjgyNyAwLjM0MSAwLjk5NiM/6np6enp6eiI/U9PUgA8jP9XV1dXV1dbWAGIADQBjADQAZABlADoAZwDRANIASQDUgBCAEYAggB8IgCFfECRkZWZhdWx0LTAuOTQwMDA6MC43ODYxNjowLjY4ODI0OjEuMDDSAG4ADQDXAHBPEQHyYnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJG9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCwwjVSRudWxs2w0ODxAREhMUFRYXGBkaGxwdHh8gISJfEBVVSUNvbG9yQ29tcG9uZW50Q291bnRXVUlHcmVlblZVSUJsdWVdVUlCbHVlLURvdWJsZVdVSUFscGhhVU5TUkdCXFVJUmVkLURvdWJsZVVVSVJlZFxOU0NvbG9yU3BhY2VWJGNsYXNzXlVJR3JlZW4tRG91YmxlEAQiPuLi4yI/Hp6fIz/j09PT09PUIj+AAABPEBAwLjkzMyAwLjQ0MyAwLjYyIz/t3d3d3d3eIj9u7u8QAoACIz/cXFxcXFxc0yQlJicoKlokY2xhc3NuYW1lWCRjbGFzc2VzWyRjbGFzc2hpbnRzV1VJQ29sb3KiJylYTlNPYmplY3ShK1dOU0NvbG9yAAgAEQAaACQAKQAyADcASQBMAFEAUwBXAF0AdACMAJQAmwCpALEAtwDEAMoA1wDeAO0A7wD0APkBAgEHARoBIwEoASoBLAE1ATwBRwFQAVwBZAFnAXABcgAAAAAAAAIBAAAAAAAAACwAAAAAAAAAAAAAAAAAAAF6gA3bAHcAeAB5AHoAewB8AH0AfgB/AA0AgACBANoA2wDcAIUA3QDeAN8AiQCKAOEiPuLi4yI/Hp6fIz/j09PT09PUTxAQMC45MzMgMC40NDMgMC42MiM/7d3d3d3d3iI/bu7vgA8jP9xcXFxcXFzWAGIADQBjADQAZABlADoAZwDlAOYASQDogBCAEYAkgCMIgCVfECRkZWZhdWx0LTAuMDE2OTQ6MS4wMDAwMDowLjc1NDAwOjEuMDDSAG4ADQDrAHBPEQGPYnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJG9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCwwcVSRudWxs2A0ODxAREhMUFRYXGBkaGBtfEBVVSUNvbG9yQ29tcG9uZW50Q291bnRXVUlHcmVlblZVSUJsdWVXVUlBbHBoYVVOU1JHQlYkY2xhc3NVVUlSZWRcTlNDb2xvclNwYWNlEAQiPw7ZFyI/AgxKIj+AAABNMSAwLjU1OCAwLjUwOIACEALTHR4fICEjWiRjbGFzc25hbWVYJGNsYXNzZXNbJGNsYXNzaGludHNXVUlDb2xvcqIgIlhOU09iamVjdKEkV05TQ29sb3IACAARABoAJAApADIANwBJAEwAUQBTAFcAXQBuAIYAjgCVAJ0AowCqALAAvQC/AMQAyQDOANwA3gDgAOcA8gD7AQcBDwESARsBHQAAAAAAAAIBAAAAAAAAACUAAAAAAAAAAAAAAAAAAAElgA3YAHcAeAB5AHsAfAANAH4AfwCBAO4A7wCFAPAAigCFAIkiPw7ZFyI/AgxKTTEgMC41NTggMC41MDiAD9YAYgANAGMANABkAGUAOgBnAPUA9gBJAPiAEIARgCiAJwiAKV8QJGRlZmF1bHQtMC4wNTEyODoxLjAwMDAwOjAuNzQ1MTA6MS4wMNIAbgANAPsAcE8RAclicGxpc3QwMNQBAgMEBQYHClgkdmVyc2lvblkkYXJjaGl2ZXJUJHRvcFgkb2JqZWN0cxIAAYagXxAPTlNLZXllZEFyY2hpdmVy0QgJVHJvb3SAAaMLDCBVJG51bGzaDQ4PEBESExQVFhcYGRobHB0bHh9fEBVVSUNvbG9yQ29tcG9uZW50Q291bnRXVUlHcmVlblZVSUJsdWVdVUlCbHVlLURvdWJsZVdVSUFscGhhVU5TUkdCViRjbGFzc1VVSVJlZFxOU0NvbG9yU3BhY2VeVUlHcmVlbi1Eb3VibGUQBCI/JaWmIj76+vsjP99fX19fX18iP4AAAEwxIDAuNjQ3IDAuNDmAAhACIz/ktLS0tLS10yEiIyQlJ1okY2xhc3NuYW1lWCRjbGFzc2VzWyRjbGFzc2hpbnRzV1VJQ29sb3KiJCZYTlNPYmplY3ShKFdOU0NvbG9yAAgAEQAaACQAKQAyADcASQBMAFEAUwBXAF0AcgCKAJIAmQCnAK8AtQC8AMIAzwDeAOAA5QDqAPMA+AEFAQcBCQESARkBJAEtATkBQQFEAU0BTwAAAAAAAAIBAAAAAAAAACkAAAAAAAAAAAAAAAAAAAFXgA3aAHcAeAB5AHoAewB8AA0AfgB/AIAAgQD+AP8BAACFAQEAigCFAIkBAyI/JaWmIj76+vsjP99fX19fX19MMSAwLjY0NyAwLjQ5gA8jP+S0tLS0tLXWAGIADQBjADQAZABlADoAZwEHAQgASQEKgBCAEYAsgCsIgC1fECRkZWZhdWx0LTAuMDk2OTE6MC45OTI0ODowLjczNDAwOjEuMDDSAG4ADQENAHBPEQGbYnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJG9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCwwdVSRudWxs2A0ODxAREhMUFRYXGBkaGxxfEBVVSUNvbG9yQ29tcG9uZW50Q291bnRXVUlHcmVlblZVSUJsdWVXVUlBbHBoYVVOU1JHQlYkY2xhc3NVVUlSZWRcTlNDb2xvclNwYWNlEAQiP0bpeSI+8KPXIj+AAABPEBAwLjk5OCAwLjc3NyAwLjQ3gAIiP3987hAC0x4fICEiJFokY2xhc3NuYW1lWCRjbGFzc2VzWyRjbGFzc2hpbnRzV1VJQ29sb3KiISNYTlNPYmplY3ShJVdOU0NvbG9yAAgAEQAaACQAKQAyADcASQBMAFEAUwBXAF0AbgCGAI4AlQCdAKMAqgCwAL0AvwDEAMkAzgDhAOMA6ADqAPEA/AEFAREBGQEcASUBJwAAAAAAAAIBAAAAAAAAACYAAAAAAAAAAAAAAAAAAAEvgA3YAHcAeAB5AHsAfAANAH4AfwCBARABEQCFARIAigEUAIkiP0bpeSI+8KPXTxAQMC45OTggMC43NzcgMC40N4APIj9/fO7WAGIADQBjADQAZABlADoAZwEYARkASQEbgBCAEYAwgC8IgDFfECRkZWZhdWx0LTAuMTIwMTA6MS4wMDAwMDowLjczMzMzOjEuMDDSAG4ADQEeAHBPEQHKYnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJG9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCwwgVSRudWxs2g0ODxAREhMUFRYXGBkaGxwdGx4fXxAVVUlDb2xvckNvbXBvbmVudENvdW50V1VJR3JlZW5WVUlCbHVlXVVJQmx1ZS1Eb3VibGVXVUlBbHBoYVVOU1JHQlYkY2xhc3NVVUlSZWRcTlNDb2xvclNwYWNlXlVJR3JlZW4tRG91YmxlEAQiP1nZ2iI+7u7vIz/d3d3d3d3eIj+AAABNMSAwLjg1MSAwLjQ2N4ACEAIjP+s7Ozs7OzvTISIjJCUnWiRjbGFzc25hbWVYJGNsYXNzZXNbJGNsYXNzaGludHNXVUlDb2xvcqIkJlhOU09iamVjdKEoV05TQ29sb3IACAARABoAJAApADIANwBJAEwAUQBTAFcAXQByAIoAkgCZAKcArwC1ALwAwgDPAN4A4ADlAOoA8wD4AQYBCAEKARMBGgElAS4BOgFCAUUBTgFQAAAAAAAAAgEAAAAAAAAAKQAAAAAAAAAAAAAAAAAAAViADdoAdwB4AHkAegB7AHwADQB+AH8AgACBASEBIgEjAIUBJACKAIUAiQEmIj9Z2doiPu7u7yM/3d3d3d3d3k0xIDAuODUxIDAuNDY3gA8jP+s7Ozs7OzvWAGIADQBjADQAZABlADoAZwEqASsASQEtgBCAEYA0gDMIgDVfECRkZWZhdWx0LTAuMTU3MzI6MS4wMDAwMDowLjc5MDIwOjEuMDDSAG4ADQEwAHBPEQHJYnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJG9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCwwgVSRudWxs2g0ODxAREhMUFRYXGBkaGxwdGx4fXxAVVUlDb2xvckNvbXBvbmVudENvdW50V1VJR3JlZW5WVUlCbHVlXVVJQmx1ZS1Eb3VibGVXVUlBbHBoYVVOU1JHQlYkY2xhc3NVVUlSZWRcTlNDb2xvclNwYWNlXlVJR3JlZW4tRG91YmxlEAQiP3n5+iI/FJSVIz/ikpKSkpKTIj+AAABMMSAwLjk3NiAwLjU4gAIQAiM/7z8/Pz8/P9MhIiMkJSdaJGNsYXNzbmFtZVgkY2xhc3Nlc1skY2xhc3NoaW50c1dVSUNvbG9yoiQmWE5TT2JqZWN0oShXTlNDb2xvcgAIABEAGgAkACkAMgA3AEkATABRAFMAVwBdAHIAigCSAJkApwCvALUAvADCAM8A3gDgAOUA6gDzAPgBBQEHAQkBEgEZASQBLQE5AUEBRAFNAU8AAAAAAAACAQAAAAAAAAApAAAAAAAAAAAAAAAAAAABV4AN2gB3AHgAeQB6AHsAfAANAH4AfwCAAIEBMwE0ATUAhQE2AIoAhQCJATgiP3n5+iI/FJSVIz/ikpKSkpKTTDEgMC45NzYgMC41OIAPIz/vPz8/Pz8/1gBiAA0AYwA0AGQAZQA6AGcBPAE9AEkBP4AQgBGAOIA3CIA5XxAkZGVmYXVsdC0wLjE4MTgyOjAuNzkyMDA6MC43NTQ5MDoxLjAw0gBuAA0BQgBwTxEB82JwbGlzdDAw1AECAwQFBgcKWCR2ZXJzaW9uWSRhcmNoaXZlclQkdG9wWCRvYmplY3RzEgABhqBfEA9OU0tleWVkQXJjaGl2ZXLRCAlUcm9vdIABowsMI1UkbnVsbNsNDg8QERITFBUWFxgZGhscHR4fICEiXxAVVUlDb2xvckNvbXBvbmVudENvdW50V1VJR3JlZW5WVUlCbHVlXVVJQmx1ZS1Eb3VibGVXVUlBbHBoYVVOU1JHQlxVSVJlZC1Eb3VibGVVVUlSZWRcTlNDb2xvclNwYWNlViRjbGFzc15VSUdyZWVuLURvdWJsZRAEIj9y8vMiPw+PkCM/4fHx8fHx8iI/gAAATxARMC45MTQgMC45NDkgMC41NjEjP+09PT09PT0iP2np6hACgAIjP+5eXl5eXl7TJCUmJygqWiRjbGFzc25hbWVYJGNsYXNzZXNbJGNsYXNzaGludHNXVUlDb2xvcqInKVhOU09iamVjdKErV05TQ29sb3IACAARABoAJAApADIANwBJAEwAUQBTAFcAXQB0AIwAlACbAKkAsQC3AMQAygDXAN4A7QDvAPQA+QECAQcBGwEkASkBKwEtATYBPQFIAVEBXQFlAWgBcQFzAAAAAAAAAgEAAAAAAAAALAAAAAAAAAAAAAAAAAAAAXuADdsAdwB4AHkAegB7AHwAfQB+AH8ADQCAAIEBRQFGAUcAhQFIAUkBSgCJAIoBTCI/cvLzIj8Pj5AjP+Hx8fHx8fJPEBEwLjkxNCAwLjk0OSAwLjU2MSM/7T09PT09PSI/aenqgA8jP+5eXl5eXl7WAGIADQBjADQAZABlADoAZwFQAVEASQFTgBCAEYA8gDsIgD1fECRkZWZhdWx0LTAuMjU2MTA6MC41NDY2NzowLjcwNTg4OjEuMDDSAG4ADQFWAHBPEQHzYnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJG9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCwwjVSRudWxs2w0ODxAREhMUFRYXGBkaGxwdHh8gISJfEBVVSUNvbG9yQ29tcG9uZW50Q291bnRXVUlHcmVlblZVSUJsdWVdVUlCbHVlLURvdWJsZVdVSUFscGhhVU5TUkdCXFVJUmVkLURvdWJsZVVVSVJlZFxOU0NvbG9yU3BhY2VWJGNsYXNzXlVJR3JlZW4tRG91YmxlEAQiP13d3iI/C4uMIz/hcXFxcXFxIj+AAABPEBEwLjY5NCAwLjg2NyAwLjU0NSM/5jY2NjY2NiI/MbGyEAKAAiM/67u7u7u7vNMkJSYnKCpaJGNsYXNzbmFtZVgkY2xhc3Nlc1skY2xhc3NoaW50c1dVSUNvbG9yoicpWE5TT2JqZWN0oStXTlNDb2xvcgAIABEAGgAkACkAMgA3AEkATABRAFMAVwBdAHQAjACUAJsAqQCxALcAxADKANcA3gDtAO8A9AD5AQIBBwEbASQBKQErAS0BNgE9AUgBUQFdAWUBaAFxAXMAAAAAAAACAQAAAAAAAAAsAAAAAAAAAAAAAAAAAAABe4AN2wB3AHgAeQB6AHsAfAB9AH4AfwANAIAAgQFZAVoBWwCFAVwBXQFeAIkAigFgIj9d3d4iPwuLjCM/4XFxcXFxcU8QETAuNjk0IDAuODY3IDAuNTQ1Iz/mNjY2NjY2Ij8xsbKADyM/67u7u7u7vNYAYgANAGMANABkAGUAOgBnAWQBZQBJAWeAEIARgECAPwiAQV8QJGRlZmF1bHQtMC4yODg1NTowLjE2ODg1OjAuNzE1MDk6MS4wMNIAbgANAWoAcE8RAZxicGxpc3QwMNQBAgMEBQYHClgkdmVyc2lvblkkYXJjaGl2ZXJUJHRvcFgkb2JqZWN0cxIAAYagXxAPTlNLZXllZEFyY2hpdmVy0QgJVHJvb3SAAaMLDB1VJG51bGzYDQ4PEBESExQVFhcYGRobHF8QFVVJQ29sb3JDb21wb25lbnRDb3VudFdVSUdyZWVuVlVJQmx1ZVdVSUFscGhhVU5TUkdCViRjbGFzc1VVSVJlZFxOU0NvbG9yU3BhY2UQBCI/Q2EjIj8qv40iP4AAAE8QETAuNjkzIDAuNzYzIDAuNjY3gAIiPzFdtRAC0x4fICEiJFokY2xhc3NuYW1lWCRjbGFzc2VzWyRjbGFzc2hpbnRzV1VJQ29sb3KiISNYTlNPYmplY3ShJVdOU0NvbG9yAAgAEQAaACQAKQAyADcASQBMAFEAUwBXAF0AbgCGAI4AlQCdAKMAqgCwAL0AvwDEAMkAzgDiAOQA6QDrAPIA/QEGARIBGgEdASYBKAAAAAAAAAIBAAAAAAAAACYAAAAAAAAAAAAAAAAAAAEwgA3YAHcAeAB5AHsAfAANAH4AfwCBAW0BbgCFAW8AigFxAIkiP0NhIyI/Kr+NTxARMC42OTMgMC43NjMgMC42NjeADyI/MV211gBiAA0AYwA0AGQAZQA6AGcBdQF2AEkBeIAQgBGARIBDCIBFXxAkZGVmYXVsdC0wLjUzMjc0OjAuMTg3ODU6MC42ODA1MDoxLjAw0gBuAA0BewBwTxEBm2JwbGlzdDAw1AECAwQFBgcKWCR2ZXJzaW9uWSRhcmNoaXZlclQkdG9wWCRvYmplY3RzEgABhqBfEA9OU0tleWVkQXJjaGl2ZXLRCAlUcm9vdIABowsMHVUkbnVsbNgNDg8QERITFBUWFxgZGhscXxAVVUlDb2xvckNvbXBvbmVudENvdW50V1VJR3JlZW5WVUlCbHVlV1VJQWxwaGFVTlNSR0JWJGNsYXNzVVVJUmVkXE5TQ29sb3JTcGFjZRAEIj83iS0iPz2StyI/gAAATxAQMC42MiAwLjcxNyAwLjc0MYACIj8e2BcQAtMeHyAhIiRaJGNsYXNzbmFtZVgkY2xhc3Nlc1skY2xhc3NoaW50c1dVSUNvbG9yoiEjWE5TT2JqZWN0oSVXTlNDb2xvcgAIABEAGgAkACkAMgA3AEkATABRAFMAVwBdAG4AhgCOAJUAnQCjAKoAsAC9AL8AxADJAM4A4QDjAOgA6gDxAPwBBQERARkBHAElAScAAAAAAAACAQAAAAAAAAAmAAAAAAAAAAAAAAAAAAABL4AN2AB3AHgAeQB7AHwADQB+AH8AgQF+AX8AhQGAAIoBggCJIj83iS0iPz2St08QEDAuNjIgMC43MTcgMC43NDGADyI/HtgX1gBiAA0AYwA0AGQAZQA6AGcBhgGHAEkBiYAQgBGASIBHCIBJXxAkZGVmYXVsdC0wLjg0MDI2OjAuMTAyOTg6MC42ODg3OToxLjAw0gBuAA0BjABwTxEBnGJwbGlzdDAw1AECAwQFBgcKWCR2ZXJzaW9uWSRhcmNoaXZlclQkdG9wWCRvYmplY3RzEgABhqBfEA9OU0tleWVkQXJjaGl2ZXLRCAlUcm9vdIABowsMHVUkbnVsbNgNDg8QERITFBUWFxgZGhscXxAVVUlDb2xvckNvbXBvbmVudENvdW50V1VJR3JlZW5WVUlCbHVlV1VJQWxwaGFVTlNSR0JWJGNsYXNzVVVJUmVkXE5TQ29sb3JTcGFjZRAEIj8oIDEiPzfaFyI/gAAATxARMC43MjEgMC42NTcgMC43MTiAAiI/OIirEALTHh8gISIkWiRjbGFzc25hbWVYJGNsYXNzZXNbJGNsYXNzaGludHNXVUlDb2xvcqIhI1hOU09iamVjdKElV05TQ29sb3IACAARABoAJAApADIANwBJAEwAUQBTAFcAXQBuAIYAjgCVAJ0AowCqALAAvQC/AMQAyQDOAOIA5ADpAOsA8gD9AQYBEgEaAR0BJgEoAAAAAAAAAgEAAAAAAAAAJgAAAAAAAAAAAAAAAAAAATCADdgAdwB4AHkAewB8AA0AfgB/AIEBjwGQAIUBkQCKAZMAiSI/KCAxIj832hdPEBEwLjcyMSAwLjY1NyAwLjcxOIAPIj84iKvWAGIADQBjADQAZABlADoAZwGXAZgASQGagBCAEYBMgEsIgE1fECRkZWZhdWx0LTAuMDk3Mjk6MC4xMTc3MTowLjY5MDg3OjEuMDDSAG4ADQGdAHBPEQGcYnBsaXN0MDDUAQIDBAUGBwpYJHZlcnNpb25ZJGFyY2hpdmVyVCR0b3BYJG9iamVjdHMSAAGGoF8QD05TS2V5ZWRBcmNoaXZlctEICVRyb290gAGjCwwdVSRudWxs2A0ODxAREhMUFRYXGBkaGxxfEBVVSUNvbG9yQ29tcG9uZW50Q291bnRXVUlHcmVlblZVSUJsdWVXVUlBbHBoYVVOU1JHQlYkY2xhc3NVVUlSZWRcTlNDb2xvclNwYWNlEAQiPzJsUiI/J4wrIj+AAABPEBEwLjcyNyAwLjY5NyAwLjY1NIACIj86LbMQAtMeHyAhIiRaJGNsYXNzbmFtZVgkY2xhc3Nlc1skY2xhc3NoaW50c1dVSUNvbG9yoiEjWE5TT2JqZWN0oSVXTlNDb2xvcgAIABEAGgAkACkAMgA3AEkATABRAFMAVwBdAG4AhgCOAJUAnQCjAKoAsAC9AL8AxADJAM4A4gDkAOkA6wDyAP0BBgESARoBHQEmASgAAAAAAAACAQAAAAAAAAAmAAAAAAAAAAAAAAAAAAABMIAN2AB3AHgAeQB7AHwADQB+AH8AgQGgAaEAhQGiAIoBpACJIj8ybFIiPyeMK08QETAuNzI3IDAuNjk3IDAuNjU0gA8iPzots9YAYgANAGMANABkAGUAOgBnAagBqQBJAauAEIARgFCATwiAUV8QJGRlZmF1bHQtMC4wMDAwMDowLjAwMDAwOjEuMDAwMDA6MS4wMNIAbgANAa4AcE8RAYxicGxpc3QwMNQBAgMEBQYHClgkdmVyc2lvblkkYXJjaGl2ZXJUJHRvcFgkb2JqZWN0cxIAAYagXxAPTlNLZXllZEFyY2hpdmVy0QgJVHJvb3SAAaQLDBobVSRudWxs1w0ODxAREhMUFRUWFxgZXxAVVUlDb2xvckNvbXBvbmVudENvdW50V1VJV2hpdGVXVUlBbHBoYVYkY2xhc3NfEBFVSVN5c3RlbUNvbG9yTmFtZVdOU1doaXRlXE5TQ29sb3JTcGFjZRACIj+AAACAA4ACQTEQBFp3aGl0ZUNvbG9y0xwdHh8gIlokY2xhc3NuYW1lWCRjbGFzc2VzWyRjbGFzc2hpbnRzV1VJQ29sb3KiHyFYTlNPYmplY3ShI1dOU0NvbG9yAAgAEQAaACQAKQAyADcASQBMAFEAUwBYAF4AbQCFAI0AlQCcALAAuADFAMcAzADOANAA0gDUAN8A5gDxAPoBBgEOAREBGgEcAAAAAAAAAgEAAAAAAAAAJAAAAAAAAAAAAAAAAAAAASSADdcAdwGxAHsADQGyAbMAfwG0AIUAhQCKAbYBtwG4V1VJV2hpdGVfEBFVSVN5c3RlbUNvbG9yTmFtZVdOU1doaXRlEAKAD4BSQTEQBFp3aGl0ZUNvbG9y1gBiAA0AYwA0AGQAZQA6AGcBvQG+AEkBwIAQgBGAVYBUCIBWXxAkZGVmYXVsdC0wLjAwMDAwOjAuMDAwMDA6MC4wMDAwMDoxLjAw0gBuAA0BwwBwTxEBk2JwbGlzdDAw1AECAwQFBgcKWCR2ZXJzaW9uWSRhcmNoaXZlclQkdG9wWCRvYmplY3RzEgABhqBfEA9OU0tleWVkQXJjaGl2ZXLRCAlUcm9vdIABpAsMGxxVJG51bGzXDQ4PEBESExQVFhcYGRpfEBVVSUNvbG9yQ29tcG9uZW50Q291bnRXVUlXaGl0ZVdVSUFscGhhViRjbGFzc18QEVVJU3lzdGVtQ29sb3JOYW1lV05TV2hpdGVcTlNDb2xvclNwYWNlEAIiAAAAACI/gAAAgAOAAkEwEARaYmxhY2tDb2xvctMdHh8gISNaJGNsYXNzbmFtZVgkY2xhc3Nlc1skY2xhc3NoaW50c1dVSUNvbG9yoiAiWE5TT2JqZWN0oSRXTlNDb2xvcgAIABEAGgAkACkAMgA3AEkATABRAFMAWABeAG0AhQCNAJUAnACwALgAxQDHAMwA0QDTANUA1wDZAOQA6wD2AP8BCwETARYBHwEhAAAAAAAAAgEAAAAAAAAAJQAAAAAAAAAAAAAAAAAAASmADdcAdwGxAHsADQGyAbMAfwG0AcYAhQCKAcgByQG4IgAAAACAD4BXQTBaYmxhY2tDb2xvctIAIgAjAcwBzVdOU0FycmF5ogHMACgQAdIAIgAjAdAB0V8QFFBSRWRpdG9yQ29sb3JQYWxldHRlogHSAChfEBRQUkVkaXRvckNvbG9yUGFsZXR0ZdIAIgAjAdQB1V8QIFBSRWRpdG9yQ29sb3JQaWNrZXJDb25maWd1cmF0aW9uogHWAChfECBQUkVkaXRvckNvbG9yUGlja2VyQ29uZmlndXJhdGlvbtIAIgAjAdgB2V8QJlBSUG9zdGVyU29saWRDb2xvckhvbWVTY3JlZW5BcHBlYXJhbmNlowHaAdsAKF8QJlBSUG9zdGVyU29saWRDb2xvckhvbWVTY3JlZW5BcHBlYXJhbmNlXxAcUFJQb3N0ZXJIb21lU2NyZWVuQXBwZWFyYW5jZdMAKgArAA0ALAHeAd+AAIBfgGPYADAADQAxADIAMwA0ADUANgA3ADgAOQA6AB4B5gAsAeiAB4BcgFuAEAmAYIAAgGFfEBxncmFkaWVudEhvbWVTY3JlZW5BcHBlYXJhbmNl1QANAEIAQwBEAEUARgHsAEgASQAsgFqAYoBZCIAA0gBMAA0B8QBgrxASAE4ATwBQAFEAUgBTAFQAVQBWAFcAWABZAFoAWwBcAF0AXgBfgAqAEoAWgBqAHoAigCaAKoAugDKANoA6gD6AQoBGgEqAToBTgFjSACIAIwIGAgdfECRQUlBvc3RlckdyYWRpZW50SG9tZVNjcmVlbkFwcGVhcmFuY2WjAggCCQAoXxAkUFJQb3N0ZXJHcmFkaWVudEhvbWVTY3JlZW5BcHBlYXJhbmNlXxAcUFJQb3N0ZXJIb21lU2NyZWVuQXBwZWFyYW5jZdMAHAANAB0AHgIMAEkJgGUI0gAiACMCDwIQXxAmUFJQb3N0ZXJIb21lUG9zdGVySG9tZVNjcmVlbkFwcGVhcmFuY2WjAhECEgAoXxAmUFJQb3N0ZXJIb21lUG9zdGVySG9tZVNjcmVlbkFwcGVhcmFuY2VfEBxQUlBvc3RlckhvbWVTY3JlZW5BcHBlYXJhbmNl2QIUAA0CFQIWAhcCGAIZAhoCGwBJAh0CHgIfAiACIQIiAiMALFdfZGltbWVkXxAPX2ljb25UaW50U291cmNlXxAbX2ljb25Vc2VySW50ZXJmYWNlU3R5bGVUeXBlXxAWX2ljb25Vc2VySW50ZXJmYWNlU2l6ZV8QHl9pY29uVXNlckludGVyZmFjZVN0eWxlVmFyaWFudF8QD190aW50Q29sb3JTdHlsZV8QIl91c2VyU2VsZWN0ZWRWYXJpYW50c0ZvclN0eWxlVHlwZXNfEBNfc3VnZ2VzdGVkVGludENvbG9yCIB4gG2Ab4BugHCAZ4BxgADXAiYCJwANAigCKQIqAisCLAItAi4ASAIwAjECLFZfYWxwaGFfEA9fbHVtaW5hbmNlVmFsdWVYX3ZlcnNpb25UX2h1ZVpfbHVtaW5hbmNlW19zYXR1cmF0aW9ugGuAaYBsgFmAaIBqgGsjP+Azt5iQzt8jP9gAAAAAAAAjP+AAAAAAAAAjP/AAAAAAAADSACIAIwI4AjlfECZQVUlEaXNjcmV0ZUdyYWRpZW50VmFyaWF0ZWRDdXN0b21TdHlsZaMCOgI7AChfECZQVUlEaXNjcmV0ZUdyYWRpZW50VmFyaWF0ZWRDdXN0b21TdHlsZV5QVUlTdHlsZUN1c3RvbV8QE3dhbGxwYXBlclN1Z2dlc3Rpb25VTEFSR0VVY29sb3JVbGlnaHTTAkEATAANAkICRwJMV05TLmtleXOkAkMCRAJFAkaAcoBzgHSAdaQCIQJJAiECIYBwgHaAcIBwgHdVY2xlYXJUZGFya1dkZWZhdWx0VmFjY2VudFZhbHdheXPSACIAIwJTAlRcTlNEaWN0aW9uYXJ5ogJTACjSACIAIwJWAldfECxQUlBvc3RlckhvbWVTY3JlZW5DdXN0b21pemF0aW9uQ29uZmlndXJhdGlvbqICWAAoXxAsUFJQb3N0ZXJIb21lU2NyZWVuQ3VzdG9taXphdGlvbkNvbmZpZ3VyYXRpb27SACIAIwJaAltfEB9QUlBvc3RlckhvbWVTY3JlZW5Db25maWd1cmF0aW9uogJcAChfEB9QUlBvc3RlckhvbWVTY3JlZW5Db25maWd1cmF0aW9uAAgAGQAiACwAMQA6AD8AUQBWAFsAXQFUAVoBdwF+AZcBrgHDAdoB9wIOAhACEgIUAhYCGAIaAhwCKQJJAmECYgJkAmUCbgJ5AoICqwKyAtsC+gMDAxADFgMxAzMDNQM3A1gDXwN2A34DigOVA6MDqwOtA68DsQOzA7QDtgO4A7oD1gPfA/QD+wQHBB4ELAQuBDAEMgQzBDUEPgRJBHAEcgR0BHYEeAR6BHwEfgSABIIEhASGBIgEigSMBI4EkASSBJQElgSvBL4EyATSBNgE2gTcBN4E4AThBOMFCgUTBRsHEgcUBx0HKwcyB0AHRwd0B4wHlAebB6kHsQe3B8QHygfXB+YH6AftB/IH+wgACBQIHQgiCCQIJggvCDwISAhQCFUIWAhgCGkIdwh8CIoIowilCKcIqQirCKwIrgjVCN4KcQpzCpQKmQqnCqkKrgrHCskKywrNCs8K0ArSCvkLAgz5DPsNKA0tDTINOw1PDVgNXQ1fDWgNgQ2DDYUNhw2JDYoNjA2zDbwPsw+1D+IP5w/sD/UQCRASEBcQGRAiEDsQPRA/EEEQQxBEEEYQbRB2EmwSbhKbEqASpRKuEsESyhLPEtES2hLzEvUS9xL5EvsS/BL+EyUTLhTBFMMU5BTpFO4U/BT+FRcVGRUbFR0VHxUgFSIVSRVSFx8XIRdKF08XVBddF2oXbBd1F44XkBeSF5QXlheXF5kXwBfJGWgZahmLGZAZlRmoGaoZrxnIGcoZzBnOGdAZ0RnTGfoaAxvRG9Mb/BwBHAYcDxwdHB8cKBxBHEMcRRxHHEkcShxMHHMcfB5JHksedB55Hn4ehx6UHpYenx64HroevB6+HsAewR7DHuoe8yDqIOwhGSEeISMhLCFAIUkhTiFQIVkhciF0IXYheCF6IXshfSGkIa0jpCOmI9Mj2CPdI+Yj+iQDJAgkCiQTJCwkLiQwJDIkNCQ1JDckXiRnJgcmCSYqJi8mNCZIJkomTyZoJmombCZuJnAmcSZzJpomoyhCKEQoZShqKG8ogiiEKIkooiikKKYoqCiqKKsorSjUKN0qfSp/KqAqpSqqKr4qwCrFKt4q4CriKuQq5irnKukrECsZLLksuyzcLOEs5iz6LPwtAS0aLRwtHi0gLSItIy0lLUwtVS7lLucvBC8MLyAvKC8qLywvLi8wLzIvPS9WL1gvWi9cL14vXy9hL4gvkTEoMSoxRzFMMU4xUDFSMV0xZjFuMXMxdTF+MZUxmjGxMbox3THiMgUyDjI3Mj4yZzKGMpMylTKXMpkyujK8Mr4ywDLCMsMyxTLHMsky6DL9Mv8zATMDMwQzBjMPMzYzODM6MzwzPjNAM0IzRDNGM0gzSjNMM04zUDNSM1QzVjNYM1ozXDNlM4wzkzO6M9kz5jPnM+kz6jPzNBw0IzRMNGs0kDSYNKo0yDThNQI1FDU5NU81UDVSNVQ1VjVYNVo1XDVeNWA1fTWENZY1nzWkNa81uzW9Nb81wTXDNcU1xzXJNdI12zXkNe019jYfNiY2TzZeNnQ2ejaANoY2kzabNqQ2pjaoNqo2rDa1Nrc2uTa7Nr02vzbFNso20jbZNuA26Tb2Nvs3BDczNzg3ZzdwN5I3lwAAAAAAAAICAAAAAAAAAl0AAAAAAAAAAAAAAAAAADe5"\n    private static let fluidityHomeBlurOffB64 = "YnBsaXN0MDDUAAEAAgADAAQABQAGAAcAClgkdmVyc2lvblkkYXJjaGl2ZXJUJHRvcFgkb2JqZWN0cxIAAYagXxAPTlNLZXllZEFyY2hpdmVy0QAIAAlUcm9vdIABrxB6AAsADAAbACEAKQAvAD8AQABBAEsAYQBsAG0AcQB2AIwAFQCSAJYAnQCeAKEApgCtAK4AsQC6AMEAwgDFAM4A1QDWANkA4gDpAOoA7QDyAPkA+gD9AQQBCwEMAQ8BFQEcAR0BIAEnAS4BLwEyATkBQAFBAUQBTQFUAVUBWAFhAWgBaQFsAXIBeQF6AX0BgwGKAYsBjgGUAZsBnAGfAaUBrAGtAbABuQG6AcEBwgHFAcoBywHOAc8AiQHTAdcB3AHgAekB6gHwAgUCCgIOAhMCJQIzAjQCNQI2AjcCPAI9Aj4CPwJAAk0CTgJPAlACUQJSAlUCWVUkbnVsbNcADQAOAA8AEAARABIAEwAUABUAFgAXABgAGQAaViRjbGFzc18QFnNlbGVjdGVkQXBwZWFyYW5jZVR5cGVfEBRob21lUG9zdGVyQXBwZWFyYW5jZV8QEmdyYWRpZW50QXBwZWFyYW5jZV8QFGxvY2tQb3N0ZXJBcHBlYXJhbmNlXxAaY3VzdG9taXphdGlvbkNvbmZpZ3VyYXRpb25fEBRzb2xpZENvbG9yQXBwZWFyYW5jZYB5EACAZIBegAKAZoAE0wAcAA0AHQAeAB8AIF8QHWFsbG93c01vZGlmeWluZ0xlZ2liaWxpdHlCbHVyXxAVbGVnaWJpbGl0eUJsdXJFbmFibGVkCYADCNIAIgAjACQAJVokY2xhc3NuYW1lWCRjbGFzc2VzXxAmUFJQb3N0ZXJMb2NrUG9zdGVySG9tZVNjcmVlbkFwcGVhcmFuY2WjACYAJwAoXxAmUFJQb3N0ZXJMb2NrUG9zdGVySG9tZVNjcmVlbkFwcGVhcmFuY2VfEBxQUlBvc3RlckhvbWVTY3JlZW5BcHBlYXJhbmNlWE5TT2JqZWN00wAqACsADQAsAC0ALlVjb2xvcl8QGGNvbG9yUGlja2VyQ29uZmlndXJhdGlvboAAgAWAXdgAMAANADEAMgAzADQANQA2ADcAOAA5ADoAHgA8ACwAPlZwcm9tcHRfEBRjb2xvcldlbGxEaXNwbGF5TW9kZVdjb250ZXh0W3Nob3dz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fwG0AcYAhQCKAcgByQG4IgAAAACAD4BXQTBaYmxhY2tDb2xvctIAIgAjAcwBzVdOU0FycmF5ogHMACgQAdIAIgAjAdAB0V8QFFBSRWRpdG9yQ29sb3JQYWxldHRlogHSAChfEBRQUkVkaXRvckNvbG9yUGFsZXR0ZdIAIgAjAdQB1V8QIFBSRWRpdG9yQ29sb3JQaWNrZXJDb25maWd1cmF0aW9uogHWAChfECBQUkVkaXRvckNvbG9yUGlja2VyQ29uZmlndXJhdGlvbtIAIgAjAdgB2V8QJlBSUG9zdGVyU29saWRDb2xvckhvbWVTY3JlZW5BcHBlYXJhbmNlowHaAdsAKF8QJlBSUG9zdGVyU29saWRDb2xvckhvbWVTY3JlZW5BcHBlYXJhbmNlXxAcUFJQb3N0ZXJIb21lU2NyZWVuQXBwZWFyYW5jZdMAKgArAA0ALAHeAd+AAIBfgGPYADAADQAxADIAMwA0ADUANgA3ADgAOQA6AB4B5gAsAeiAB4BcgFuAEAmAYIAAgGFfEBxncmFkaWVudEhvbWVTY3JlZW5BcHBlYXJhbmNl1QANAEIAQwBEAEUARgHsAEgAIAAsgFqAYoBZCIAA0gBMAA0B8QBgrxASAE4ATwBQAFEAUgBTAFQAVQBWAFcAWABZAFoAWwBcAF0AXgBfgAqAEoAWgBqAHoAigCaAKoAugDKANoA6gD6AQoBGgEqAToBTgFjSACIAIwIGAgdfECRQUlBvc3RlckdyYWRpZW50SG9tZVNjcmVlbkFwcGVhcmFuY2WjAggCCQAoXxAkUFJQb3N0ZXJHcmFkaWVudEhvbWVTY3JlZW5BcHBlYXJhbmNlXxAcUFJQb3N0ZXJIb21lU2NyZWVuQXBwZWFyYW5jZdMAHAANAB0AHgIMACAJgGUI0gAiACMCDwIQXxAmUFJQb3N0ZXJIb21lUG9zdGVySG9tZVNjcmVlbkFwcGVhcmFuY2WjAhECEgAoXxAmUFJQb3N0ZXJIb21lUG9zdGVySG9tZVNjcmVlbkFwcGVhcmFuY2VfEBxQUlBvc3RlckhvbWVTY3JlZW5BcHBlYXJhbmNl2QIUAA0CFQIWAhcCGAIZAhoCGwAgAh0CHgIfAiACIQIiAiMALFdfZGltbWVkXxAPX2ljb25UaW50U291cmNlXxAbX2ljb25Vc2VySW50ZXJmYWNlU3R5bGVUeXBlXxAWX2ljb25Vc2VySW50ZXJmYWNlU2l6ZV8QHl9pY29uVXNlckludGVyZmFjZVN0eWxlVmFyaWFudF8QD190aW50Q29sb3JTdHlsZV8QIl91c2VyU2VsZWN0ZWRWYXJpYW50c0ZvclN0eWxlVHlwZXNfEBNfc3VnZ2VzdGVkVGludENvbG9yCIB4gG2Ab4BugHCAZ4BxgADXAiYCJwANAigCKQIqAisCLAItAi4ASAIwAjECLFZfYWxwaGFfEA9fbHVtaW5hbmNlVmFsdWVYX3ZlcnNpb25UX2h1ZVpfbHVtaW5hbmNlW19zYXR1cmF0aW9ugGuAaYBsgFmAaIBqgGsjP+Azt5iQzt8jP9gAAAAAAAAjP+AAAAAAAAAjP/AAAAAAAADSACIAIwI4AjlfECZQVUlEaXNjcmV0ZUdyYWRpZW50VmFyaWF0ZWRDdXN0b21TdHlsZaMCOgI7AChfECZQVUlEaXNjcmV0ZUdyYWRpZW50VmFyaWF0ZWRDdXN0b21TdHlsZV5QVUlTdHlsZUN1c3RvbV8QE3dhbGxwYXBlclN1Z2dlc3Rpb25VTEFSR0VVY29sb3JVbGlnaHTTAkEATAANAkICRwJMV05TLmtleXOkAkMCRAJFAkaAcoBzgHSAdaQCIQJJAiECIYBwgHaAcIBwgHdVY2xlYXJUZGFya1dkZWZhdWx0VmFjY2VudFZhbHdheXPSACIAIwJTAlRcTlNEaWN0aW9uYXJ5ogJTACjSACIAIwJWAldfECxQUlBvc3RlckhvbWVTY3JlZW5DdXN0b21pemF0aW9uQ29uZmlndXJhdGlvbqICWAAoXxAsUFJQb3N0ZXJIb21lU2NyZWVuQ3VzdG9taXphdGlvbkNvbmZpZ3VyYXRpb27SACIAIwJaAltfEB9QUlBvc3RlckhvbWVTY3JlZW5Db25maWd1cmF0aW9uogJcAChfEB9QUlBvc3RlckhvbWVTY3JlZW5Db25maWd1cmF0aW9uAAgAGQAiACwAMQA6AD8AUQBWAFsAXQFUAVoBdwF+AZcBrgHDAdoB9wIOAhACEgIUAhYCGAIaAhwCKQJJAmECYgJkAmUCbgJ5AoICqwKyAtsC+gMDAxADFgMxAzMDNQM3A1gDXwN2A34DigOVA6MDqwOtA68DsQOzA7QDtgO4A7oD1gPfA/QD+wQHBB4ELAQuBDAEMgQzBDUEPgRJBHAEcgR0BHYEeAR6BHwEfgSABIIEhASGBIgEigSMBI4EkASSBJQElgSvBL4EyATSBNgE2gTcBN4E4AThBOMFCgUTBRsHEgcUBx0HKwcyB0AHRwd0B4wHlAebB6kHsQe3B8QHygfXB+YH6AftB/IH+wgACBQIHQgiCCQIJggvCDwISAhQCFUIWAhgCGkIdwh8CIoIowilCKcIqQirCKwIrgjVCN4KcQpzCpQKmQqnCqkKrgrHCskKywrNCs8K0ArSCvkLAgz5DPsNKA0tDTINOw1PDVgNXQ1fDWgNgQ2DDYUNhw2JDYoNjA2zDbwPsw+1D+IP5w/sD/UQCRASEBcQGRAiEDsQPRA/EEEQQxBEEEYQbRB2EmwSbhKbEqASpRKuEsESyhLPEtES2hLzEvUS9xL5EvsS/BL+EyUTLhTBFMMU5BTpFO4U/BT+FRcVGRUbFR0VHxUgFSIVSRVSFx8XIRdKF08XVBddF2oXbBd1F44XkBeSF5QXlheXF5kXwBfJGWgZahmLGZAZlRmoGaoZrxnIGcoZzBnOGdAZ0RnTGfoaAxvRG9Mb/BwBHAYcDxwdHB8cKBxBHEMcRRxHHEkcShxMHHMcfB5JHksedB55Hn4ehx6UHpYenx64HroevB6+HsAewR7DHuoe8yDqIOwhGSEeISMhLCFAIUkhTiFQIVkhciF0IXYheCF6IXshfSGkIa0jpCOmI9Mj2CPdI+Yj+iQDJAgkCiQTJCwkLiQwJDIkNCQ1JDckXiRnJgcmCSYqJi8mNCZIJkomTyZoJmombCZuJnAmcSZzJpomoyhCKEQoZShqKG8ogiiEKIkooiikKKYoqCiqKKsorSjUKN0qfSp/KqAqpSqqKr4qwCrFKt4q4CriKuQq5irnKukrECsZLLksuyzcLOEs5iz6LPwtAS0aLRwtHi0gLSItIy0lLUwtVS7lLucvBC8MLyAvKC8qLywvLi8wLzIvPS9WL1gvWi9cL14vXy9hL4gvkTEoMSoxRzFMMU4xUDFSMV0xZjFuMXMxdTF+MZUxmjGxMbox3THiMgUyDjI3Mj4yZzKGMpMylTKXMpkyujK8Mr4ywDLCMsMyxTLHMsky6DL9Mv8zATMDMwQzBjMPMzYzODM6MzwzPjNAM0IzRDNGM0gzSjNMM04zUDNSM1QzVjNYM1ozXDNlM4wzkzO6M9kz5jPnM+kz6jPzNBw0IzRMNGs0kDSYNKo0yDThNQI1FDU5NU81UDVSNVQ1VjVYNVo1XDVeNWA1fTWENZY1nzWkNa81uzW9Nb81wTXDNcU1xzXJNdI12zXkNe019jYfNiY2TzZeNnQ2ejaANoY2kzabNqQ2pjaoNqo2rDa1Nrc2uTa7Nr02vzbFNso20jbZNuA26Tb2Nvs3BDczNzg3ZzdwN5I3lwAAAAAAAAICAAAAAAAAAl0AAAAAAAAAAAAAAAAAADe5"\n\n'
+          VM_STATE = '\n    @Published var homeScreenBlurEnabled: Bool = UserDefaults.standard.object(forKey: "aircard.v10.home_screen_blur") as? Bool ?? true {\n        didSet {\n            UserDefaults.standard.set(homeScreenBlurEnabled, forKey: "aircard.v10.home_screen_blur")\n        }\n    }\n    @Published var isApplyingHomeScreenBlur: Bool = false\n'
+          VM_SYNC = '            tendiesFlashLog.append("🌫 Synchronizing iOS 27 Home Screen Blur…")\n            try await TendiesEngine.shared.setFluidityHomeScreenBlur(\n                enabled: homeScreenBlurEnabled,\n                containerPath: container,\n                pairingPath: pairingPath,\n                log: { [weak self] line in\n                    DispatchQueue.main.async {\n                        self?.tendiesFlashLog.append(line)\n                    }\n                }\n            )\n'
+          VM_FUNC = '    func applyHomeScreenBlurNow() async {\n        let pairingPath = PairingController.pairingFilePath()\n        guard FileManager.default.fileExists(atPath: pairingPath) else {\n            errorMessage = "没有可用的配对文件，请先在配对页面完成配对。"\n            return\n        }\n\n        var container = posterBoardContainer.trimmingCharacters(in: .whitespacesAndNewlines)\n        if container.isEmpty {\n            do {\n                container = try await TendiesEngine.shared.detectPosterBoardContainer(pairingPath: pairingPath)\n                posterBoardContainer = container\n                UserDefaults.standard.set(container, forKey: "aircard.posterboard_container")\n            } catch {\n                errorMessage = "无法自动找到 PosterBoard 容器：\\(error.localizedDescription)"\n                return\n            }\n        }\n\n        isApplyingHomeScreenBlur = true\n        tendiesFlashLog.append("🌫 正在应用主屏幕模糊状态…")\n        defer { isApplyingHomeScreenBlur = false }\n\n        do {\n            try await TendiesEngine.shared.setFluidityHomeScreenBlur(\n                enabled: homeScreenBlurEnabled,\n                containerPath: container,\n                pairingPath: pairingPath,\n                log: { [weak self] line in\n                    DispatchQueue.main.async {\n                        self?.tendiesFlashLog.append(line)\n                    }\n                }\n            )\n            tendiesFlashLog.append("✅ 主屏幕模糊状态已写入。")\n            if autoNeoSpringAfterFlash {\n                tendiesFlashLog.append("⚡ 自动 NeoSpring 已开启，正在重启桌面…")\n                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in\n                    self?.isNeoSpringing = true\n                    RespringHelper.triggerNeoSpring()\n                }\n            } else {\n                tendiesFlashLog.append("🧪 请手动 NeoSpring 后查看效果。")\n            }\n        } catch {\n            tendiesFlashLog.append("❌ 主屏幕模糊写入失败：\\(error.localizedDescription)")\n            errorMessage = "主屏幕模糊写入失败：\\(error.localizedDescription)"\n        }\n    }\n\n'
+          VIEW_SECTION = '                // Fluidity: iOS 27 Home Screen Blur\n                Section {\n                    Toggle(isOn: $vm.homeScreenBlurEnabled) {\n                        VStack(alignment: .leading, spacing: 2) {\n                            Text("主屏幕模糊")\n                                .font(.subheadline.weight(.medium))\n                            Text(vm.homeScreenBlurEnabled ? "开启 Blur" : "关闭 Blur")\n                                .font(.caption2)\n                                .foregroundColor(.secondary)\n                        }\n                    }\n\n                    Button {\n                        Task { await vm.applyHomeScreenBlurNow() }\n                    } label: {\n                        HStack {\n                            Spacer()\n                            if vm.isApplyingHomeScreenBlur {\n                                ProgressView()\n                            } else {\n                                Image(systemName: "drop.fill")\n                            }\n                            Text("立即应用主屏幕模糊状态")\n                            Spacer()\n                        }\n                    }\n                    .disabled(vm.isApplyingHomeScreenBlur)\n                } header: {\n                    Text("iOS 27 主屏幕")\n                } footer: {\n                    Text("iOS 18 Fluidity 动态测试码：fluidity.dynamic / Automatic / dynamic。Blur 仍写入当前实机验证过的活动配置 supplement；刷入 MercuryPoster 测试包时会自动套用动态测试码。")\n                }\n                .tint(.blue)\n\n'
+
+          engine = Path("ios-app/TendiesEngine.swift")
+          if not engine.exists():
+              raise SystemExit("TendiesEngine.swift not found")
+          es = engine.read_text()
+          if "setFluidityHomeScreenBlur" not in es:
+              marker = "    // MARK: - Send Respring Signal via Tunnel\n"
+              if marker not in es:
+                  raise SystemExit("TendiesEngine insertion marker not found")
+              es = es.replace(marker, ENGINE_METHOD + marker, 1)
+              engine.write_text(es)
+
+          vm = Path("ios-app/AppViewModel.swift")
+          if not vm.exists():
+              raise SystemExit("AppViewModel.swift not found")
+          s = vm.read_text()
+          state_anchor = '@Published var isNeoSpringing: Bool = false'
+          if "homeScreenBlurEnabled" not in s:
+              if state_anchor not in s:
+                  raise SystemExit("AppViewModel state anchor missing")
+              s = s.replace(state_anchor, state_anchor + VM_STATE, 1)
+
+          if "Synchronizing iOS 27 Home Screen Blur" not in s:
+              anchor = '            tendiesFlashPhase = .done(ok: true)\n'
+              if anchor not in s:
+                  raise SystemExit("flashSelectedTendies success anchor missing")
+              s = s.replace(anchor, VM_SYNC + anchor, 1)
+
+          if "func applyHomeScreenBlurNow() async" not in s:
+              anchor = '    func respringDevice() {\n'
+              if anchor not in s:
+                  raise SystemExit("respringDevice anchor missing")
+              s = s.replace(anchor, VM_FUNC + anchor, 1)
+          vm.write_text(s)
+
+          view = Path("ios-app/TendiesView.swift")
+          if not view.exists():
+              raise SystemExit("TendiesView.swift not found")
+          v = view.read_text()
+          if "立即应用主屏幕模糊状态" not in v:
+              marker = "                // Section 3: Wallpapers Gallery\n"
+              if marker not in v:
+                  raise SystemExit("Wallpapers Gallery marker not found")
+              v = v.replace(marker, VIEW_SECTION + marker, 1)
+              view.write_text(v)
+
+          checks = {
+              "TendiesEngine.swift": ["setFluidityHomeScreenBlur", CONFIG_UUID, "fluidityHomeBlurOnB64", "fluidityHomeBlurOffB64"],
+              "AppViewModel.swift": ["homeScreenBlurEnabled", "applyHomeScreenBlurNow", "Synchronizing iOS 27 Home Screen Blur"],
+              "TendiesView.swift": ["立即应用主屏幕模糊状态", "iOS 27 主屏幕", "主屏幕模糊"],
+          }
+          for file, needles in checks.items():
+              body = Path("ios-app").joinpath(file).read_text()
+              miss = [n for n in needles if n not in body]
+              if miss:
+                  raise SystemExit(f"Home Blur integration verification failed in {file}: {miss}")
+          print("V10.4 iOS 27 Home Screen Blur control integrated and verified")
+          PY
+
+      - name: Detect project and scheme
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJ="$(find . -name '*.xcodeproj' -print -quit)"
+          test -n "$PROJ"
+          DIR="$(dirname "$PROJ")"
+          NAME="$(basename "$PROJ")"
+          SCHEME="$(cd "$DIR" && xcodebuild -project "$NAME" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("project",{}).get("schemes") or [""])[0])')"
+          test -n "$SCHEME"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "project=$NAME" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+
+      - name: Build V10.4
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.xcode.outputs.dir }}"
+          xcodebuild             -project "${{ steps.xcode.outputs.project }}"             -scheme "${{ steps.xcode.outputs.scheme }}"             -configuration Release             -sdk iphoneos             -derivedDataPath "$RUNNER_TEMP/AirCardV1040"             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             MARKETING_VERSION=10.4             CURRENT_PROJECT_VERSION=1040             COMPILER_INDEX_STORE_ENABLE=NO             build
+
+      - name: Verify and fast-package
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/AirCardV1040/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 10.4" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1040" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName AirCard-iOS" "$APP/Info.plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string AirCard-iOS" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName AirCard-iOS" "$APP/Info.plist" 2>/dev/null || true
+
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+          ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist")
+          echo "Bundle ID: $ID"
+          echo "Version: $VERSION"
+          echo "Build: $BUILD"
+          [ "$VERSION" = "10.4" ]
+          [ "$BUILD" = "1040" ]
+
+          rm -rf Payload release
+          mkdir -p Payload release
+          cp -R "$APP" Payload/
+          zip -0qry "release/$IPA_NAME" Payload
+          unzip -Z1 "release/$IPA_NAME" | grep -q '^Payload/.*\.app/'
+
+          rm -rf "$RUNNER_TEMP/ipa-check"
+          mkdir -p "$RUNNER_TEMP/ipa-check"
+          unzip -q "release/$IPA_NAME" -d "$RUNNER_TEMP/ipa-check"
+          PACKED_APP="$(find "$RUNNER_TEMP/ipa-check/Payload" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$PACKED_APP"
+          test -f "$PACKED_APP/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PACKED_APP/Info.plist")" = "$ID"
+          test "$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PACKED_APP/Info.plist")" = "10.4"
+          test "$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PACKED_APP/Info.plist")" = "1040"
+
+          shasum -a 256 "release/$IPA_NAME" > release/AirCard-V10.4-iOS18-Dynamic-Test-SHA256.txt
+          ls -lh "release/$IPA_NAME"
+
+      - name: Publish standalone V10.4 中文版 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v10.4-ios18-fluidity-dynamic-test"
+          TITLE="AirCard Fluidity V10.4 · iOS18 Fluidity Dynamic Test"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "release/$IPA_NAME" release/AirCard-V10.4-iOS18-Dynamic-Test-SHA256.txt --clobber
+          else
+            gh release create "$TAG" "release/$IPA_NAME" release/AirCard-V10.4-iOS18-Dynamic-Test-SHA256.txt --title "$TITLE" --notes "AirCard Fluidity V10.4 简体中文版：iOS 18 Fluidity dynamic 测试码 + iOS 27 Home Screen Blur 实机验证路径。"
+          fi
