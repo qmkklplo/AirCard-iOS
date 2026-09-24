@@ -48,12 +48,11 @@ jobs:
 
           vm = Path("ios-app/AppViewModel.swift")
           src = vm.read_text()
-          src, n = re.subn(
-              r'\n\s*@Published var ios18FluidityDynamicEnabled: Bool = UserDefaults\.standard\.object\(forKey: "aircard\.v10\.ios18_fluidity_dynamic"\).*?\n\s*}\n',
-              '\n', src, count=1, flags=re.S
-          )
-          if n != 1:
-              raise SystemExit("Could not remove dynamic-mode AppViewModel state")
+          state_start = src.find('    @Published var ios18FluidityDynamicEnabled:')
+          state_end = src.find('    @Published var homeScreenBlurEnabled:', state_start)
+          if state_start < 0 or state_end < 0:
+              raise SystemExit("Could not delimit dynamic-mode AppViewModel state")
+          src = src[:state_start] + src[state_end:]
           vm.write_text(src)
 
           view = Path("ios-app/TendiesView.swift")
