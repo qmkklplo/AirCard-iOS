@@ -104,7 +104,7 @@ jobs:
           tail = v.index("\n    func respringDevice()", fn)
           if tail < 0: raise SystemExit("wallpaper flash end missing")
           block = v[fn:tail]
-          anchor = '            tendiesFlashPhase = .done(ok: true)\\n'
+          anchor = '            tendiesFlashPhase = .done(ok: true)\n'
           call = '''            tendiesFlashLog.append("V10.4.4 active 459C/version18 exact write")
                       try await TendiesEngine.shared.restoreActive459CTimeOfDay(
                           containerPath: container,
