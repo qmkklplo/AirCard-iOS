@@ -1,0 +1,408 @@
+name: AirCard Fluidity V10.4.3 ZH-CN MetadataOnly Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/AirCard-Fluidity-V10.4.3-MetadataOnly-Probe.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      IPA_NAME: AirCard-iOS-Fluidity-V10.4.3-MetadataOnly-Probe-ZH.ipa
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+
+      - name: Reuse V10.4 base without dynamic experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --break-system-packages pyyaml
+          python3 <<'PY'
+          from pathlib import Path
+          import yaml
+
+          src = Path('.github/workflows/AirCard-Fluidity-V10.4-iOS18-Dynamic-HomeBlur.yml')
+          if not src.exists():
+              raise SystemExit(f'Base workflow not found: {src}')
+          doc = yaml.safe_load(src.read_text())
+          steps = doc['jobs']['build']['steps']
+          wanted = [
+              'Integrate V10 features',
+              'Integrate verified iOS18 wallpaper Home Screen Blur control',
+          ]
+          found = {}
+          for step in steps:
+              name = step.get('name')
+              if name in wanted:
+                  found[name] = step.get('run', '')
+          missing = [x for x in wanted if not found.get(x)]
+          if missing:
+              raise SystemExit('Missing base build step(s): ' + ', '.join(missing))
+          for idx, name in enumerate(wanted, 1):
+              p = Path(f'/tmp/aircard-base-step-{idx}.sh')
+              p.write_text('set -euo pipefail\n' + found[name] + '\n')
+              print(f'Extracted: {name} -> {p}')
+          PY
+          bash /tmp/aircard-base-step-1.sh
+          bash /tmp/aircard-base-step-2.sh
+
+          # The dynamic-mode step is intentionally NOT executed.
+          if grep -R -n -E 'fluidity\.dynamic|aircard\.v10\.ios18_fluidity_dynamic|applyIOS18FluidityDynamicMode|iOS 18 Fluidity 动态模式' ios-app; then
+            echo 'ERROR: obsolete dynamic-mode code unexpectedly present in app source' >&2
+            exit 1
+          fi
+
+
+      - name: Integrate native Celosia timeOfDay state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          engine = Path('ios-app/TendiesEngine.swift')
+          if not engine.exists():
+              raise SystemExit('TendiesEngine.swift not found')
+          s = engine.read_text()
+
+          helper = r'''
+
+              // MARK: - iOS18 Celosia Native TimeOfDay
+
+              private func prepareIOS18CelosiaNativeTimeOfDay(
+                  in mercuryContainerRoot: URL,
+                  log: @escaping (String) -> Void
+              ) {
+                  let fm = FileManager.default
+                  let targetUUID = "459C311E-3615-4485-A24A-33A10CB3A3ED"
+                  let userInfoName = "com.apple.posterkit.provider.contents.userInfo"
+                  var patched = 0
+                  var skipped = 0
+
+                  guard let enumerator = fm.enumerator(
+                      at: mercuryContainerRoot,
+                      includingPropertiesForKeys: [.isRegularFileKey],
+                      options: [.skipsHiddenFiles]
+                  ) else {
+                      log("  ⚠️ Native Celosia timeOfDay: unable to enumerate MercuryPoster payload")
+                      return
+                  }
+
+                  while let fileURL = enumerator.nextObject() as? URL {
+                      guard fileURL.lastPathComponent == userInfoName else { continue }
+                      guard fileURL.path.contains(targetUUID) else { continue }
+                      guard let data = try? Data(contentsOf: fileURL),
+                            var plist = (try? PropertyListSerialization.propertyList(
+                              from: data, options: .mutableContainers, format: nil
+                            )) as? [String: Any] else {
+                          skipped += 1
+                          continue
+                      }
+
+                      let oldLook = plist["lookIdentifier"].map { String(describing: $0) } ?? "<missing>"
+                      plist["lookIdentifier"] = "timeOfDay"
+
+                      do {
+                          let out = try PropertyListSerialization.data(
+                              fromPropertyList: plist,
+                              format: .binary,
+                              options: 0
+                          )
+                          try out.write(to: fileURL, options: .atomic)
+                          patched += 1
+                          let rel = fileURL.path.replacingOccurrences(
+                              of: mercuryContainerRoot.path + "/",
+                              with: ""
+                          )
+                          log("  ☀️ Native Celosia: \(rel) lookIdentifier \(oldLook) → timeOfDay")
+                      } catch {
+                          skipped += 1
+                          log("  ⚠️ Native Celosia timeOfDay write failed: \(error.localizedDescription)")
+                      }
+                  }
+
+                  log("  ✅ Native Celosia timeOfDay prepared: patched=\(patched), skipped=\(skipped)")
+                  if patched == 0 {
+                      log("  ⚠️ No 459C… userInfo was patched; payload was left otherwise unchanged")
+                  }
+              }
+
+          '''
+
+          if 'prepareIOS18CelosiaNativeTimeOfDay' not in s:
+              markers = [
+                  '    // MARK: - Plist Identifier Handling\n',
+                  '    // MARK: - Plist Identifier Randomization (Matches Nugget implementation)\n',
+                  '    // MARK: - Folder Injector Helper (Single Atomic Move via AirTraffic)\n',
+              ]
+              marker = next((m for m in markers if m in s), None)
+              if marker is None:
+                  raise SystemExit('TendiesEngine helper insertion marker not found')
+              s = s.replace(marker, helper + marker, 1)
+
+          anchor = '                log("  📦 V8 Container Tendie detected — preserving original paths and identifiers")\n'
+          call = '''                let mercuryContainerRootForNativeTimeOfDay = containerStage.appendingPathComponent(
+                    "Library/Application Support/PRBPosterExtensionDataStore/61/Extensions/com.apple.MercuryPoster"
+                )
+                if FileManager.default.fileExists(atPath: mercuryContainerRootForNativeTimeOfDay.path) {
+                    log("  🧭 Applying native Celosia timeOfDay state before V8 passthrough")
+                    prepareIOS18CelosiaNativeTimeOfDay(
+                        in: mercuryContainerRootForNativeTimeOfDay,
+                        log: log
+                    )
+                }
+
+          '''
+          if 'Applying native Celosia timeOfDay state before V8 passthrough' not in s:
+              if anchor not in s:
+                  raise SystemExit('V8 passthrough anchor not found')
+              s = s.replace(anchor, call + anchor, 1)
+
+          engine.write_text(s)
+          body = engine.read_text()
+          required = [
+              'prepareIOS18CelosiaNativeTimeOfDay',
+              '459C311E-3615-4485-A24A-33A10CB3A3ED',
+              'plist["lookIdentifier"] = "timeOfDay"',
+              'Applying native Celosia timeOfDay state before V8 passthrough',
+              'V8 Container Tendie detected',
+          ]
+          missing = [x for x in required if x not in body]
+          if missing:
+              raise SystemExit('Native Celosia integration failed: ' + ', '.join(missing))
+          forbidden = [
+              'fluidity.dynamic',
+              'aircard.v10.ios18_fluidity_dynamic',
+              'applyIOS18FluidityDynamicMode',
+              'plist["appearanceMode"] = "Automatic"',
+              'plist["lookIdentifier"] = "dynamic"',
+              'prepareIOS18CelosiaHomeSnapshotRegeneration',
+          ]
+          leftovers = [x for x in forbidden if x in body]
+          if leftovers:
+              raise SystemExit('Obsolete experiment remains: ' + ', '.join(leftovers))
+          print('Native Celosia timeOfDay integration OK')
+          PY
+
+
+      - name: Add isolated MetadataOnly probe mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          engine = Path("ios-app/TendiesEngine.swift")
+          vm = Path("ios-app/AppViewModel.swift")
+          if not engine.exists() or not vm.exists():
+              raise SystemExit("Required Swift source missing")
+
+          e = engine.read_text()
+
+          class_anchor = "public static let shared = TendiesEngine()\n"
+          prop = '    public private(set) var lastFlashWasMetadataOnlyProbe: Bool = false\n'
+          if "lastFlashWasMetadataOnlyProbe" not in e:
+              if class_anchor not in e:
+                  raise SystemExit("TendiesEngine shared anchor missing")
+              e = e.replace(class_anchor, class_anchor + "\n" + prop, 1)
+
+          guard_anchor = '''        guard !items.isEmpty else {
+              log("⚠️ No wallpapers selected to flash")
+              return
+          }
+          '''
+          probe_init = guard_anchor + '''
+          lastFlashWasMetadataOnlyProbe = items.allSatisfy {
+              $0.name.localizedCaseInsensitiveContains("MetadataOnly")
+          }
+          if lastFlashWasMetadataOnlyProbe {
+              log("🧪 MetadataOnly Probe Mode — exact payload write only")
+          }
+          '''
+          if "MetadataOnly Probe Mode — exact payload write only" not in e:
+              if guard_anchor not in e:
+                  raise SystemExit("flashTendies guard anchor missing")
+              e = e.replace(guard_anchor, probe_init, 1)
+
+          old_native = '''                if FileManager.default.fileExists(atPath: mercuryContainerRootForNativeTimeOfDay.path) {
+                    log("  🧭 Applying native Celosia timeOfDay state before V8 passthrough")
+                    prepareIOS18CelosiaNativeTimeOfDay(
+                        in: mercuryContainerRootForNativeTimeOfDay,
+                        log: log
+                    )
+                }
+          '''
+          new_native = '''                if FileManager.default.fileExists(atPath: mercuryContainerRootForNativeTimeOfDay.path) && !lastFlashWasMetadataOnlyProbe {
+                    log("  🧭 Applying native Celosia timeOfDay state before V8 passthrough")
+                    prepareIOS18CelosiaNativeTimeOfDay(
+                        in: mercuryContainerRootForNativeTimeOfDay,
+                        log: log
+                    )
+                } else if lastFlashWasMetadataOnlyProbe {
+                    log("  🧪 Probe: skipped native timeOfDay preprocessing")
+                }
+          '''
+          if "Probe: skipped native timeOfDay preprocessing" not in e:
+              if old_native not in e:
+                  raise SystemExit("Native Celosia call block missing")
+              e = e.replace(old_native, new_native, 1)
+
+          pref_anchor = '''        // Always force PosterBoard cache refresh and file protections reset
+          log("\\n🔄 Forcing PosterBoard cache refresh and file protections reset…")
+          '''
+          pref_guard = '''        if lastFlashWasMetadataOnlyProbe {
+              log("🧪 Probe: skipped PosterBoard preference/cache-refresh writes")
+              progress(1.0)
+              return
+          }
+
+          ''' + pref_anchor
+          if "Probe: skipped PosterBoard preference/cache-refresh writes" not in e:
+              if pref_anchor not in e:
+                  raise SystemExit("PosterBoard preference refresh anchor missing")
+              e = e.replace(pref_anchor, pref_guard, 1)
+          engine.write_text(e)
+
+          v = vm.read_text()
+          sync = '''            tendiesFlashLog.append("🌫 Synchronizing iOS18 wallpaper Home Screen Blur…")
+              try await TendiesEngine.shared.setFluidityHomeScreenBlur(
+                  enabled: homeScreenBlurEnabled,
+                  containerPath: container,
+                  pairingPath: pairingPath,
+                  log: { [weak self] line in
+                      DispatchQueue.main.async {
+                          self?.tendiesFlashLog.append(line)
+                      }
+                  }
+              )
+          '''
+          guarded = '''            if TendiesEngine.shared.lastFlashWasMetadataOnlyProbe {
+                  tendiesFlashLog.append("🧪 Probe: skipped automatic Home Screen Blur synchronization")
+              } else {
+                  tendiesFlashLog.append("🌫 Synchronizing iOS18 wallpaper Home Screen Blur…")
+                  try await TendiesEngine.shared.setFluidityHomeScreenBlur(
+                      enabled: homeScreenBlurEnabled,
+                      containerPath: container,
+                      pairingPath: pairingPath,
+                      log: { [weak self] line in
+                          DispatchQueue.main.async {
+                              self?.tendiesFlashLog.append(line)
+                          }
+                      }
+                  )
+              }
+          '''
+          if "Probe: skipped automatic Home Screen Blur synchronization" not in v:
+              if sync not in v:
+                  raise SystemExit("Home Blur synchronization block missing")
+              v = v.replace(sync, guarded, 1)
+          vm.write_text(v)
+
+          checks = [
+              "MetadataOnly Probe Mode — exact payload write only",
+              "Probe: skipped native timeOfDay preprocessing",
+              "Probe: skipped PosterBoard preference/cache-refresh writes",
+              "Probe: skipped automatic Home Screen Blur synchronization",
+          ]
+          body = engine.read_text() + vm.read_text()
+          missing = [x for x in checks if x not in body]
+          if missing:
+              raise SystemExit("Probe patch verification failed: " + ", ".join(missing))
+          print("MetadataOnly isolated probe mode integrated OK")
+          PY
+
+      - name: Correct Home Blur footer and verify features
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          for p in Path('ios-app').rglob('*.swift'):
+              s = p.read_text(errors='ignore')
+              old = '当前测试绑定 Celosia 配置 8A50B665…；切换到新的锁屏/壁纸组合后需要重新确认配置 UUID。刷入壁纸时也会自动同步这里选择的 Blur 状态。'
+              new = '当前绑定 Celosia 配置 459C311E…；刷入时仅将原生 userInfo.lookIdentifier 设为 timeOfDay，保留 MercuryPoster 原始标识关系；主屏幕模糊继续使用已验证的 versions/18/supplement 5。'
+              if old in s:
+                  p.write_text(s.replace(old, new))
+
+          engine = Path('ios-app/TendiesEngine.swift').read_text()
+          for x in ['459C311E-3615-4485-A24A-33A10CB3A3ED', '/versions/18/supplements/', 'let supplementRevision = "5"', 'prepareIOS18CelosiaNativeTimeOfDay', 'plist["lookIdentifier"] = "timeOfDay"']:
+              if x not in engine:
+                  raise SystemExit('Missing required feature: ' + x)
+          for x in ['fluidity.dynamic', 'aircard.v10.ios18_fluidity_dynamic', 'applyIOS18FluidityDynamicMode', 'iOS 18 Fluidity 动态模式', 'prepareIOS18CelosiaHomeSnapshotRegeneration', 'plist["appearanceMode"] = "Automatic"', 'plist["lookIdentifier"] = "dynamic"']:
+              if x in engine:
+                  raise SystemExit('Obsolete dynamic-mode code remains: ' + x)
+          print('Feature verification OK')
+          PY
+
+      - name: Detect project and scheme
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJ="$(find . -name '*.xcodeproj' -print -quit)"
+          test -n "$PROJ"
+          DIR="$(dirname "$PROJ")"
+          NAME="$(basename "$PROJ")"
+          SCHEME="$(cd "$DIR" && xcodebuild -project "$NAME" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("project",{}).get("schemes") or [""])[0])')"
+          test -n "$SCHEME"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "project=$NAME" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+
+      - name: Build V10.4.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.xcode.outputs.dir }}"
+          xcodebuild -project "${{ steps.xcode.outputs.project }}" -scheme "${{ steps.xcode.outputs.scheme }}" -configuration Release -sdk iphoneos -derivedDataPath "$RUNNER_TEMP/AirCardV1042" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" MARKETING_VERSION=10.4.2 CURRENT_PROJECT_VERSION=1042 COMPILER_INDEX_STORE_ENABLE=NO build
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/AirCardV1042/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 10.4.2" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1042" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName AirCard-iOS" "$APP/Info.plist" 2>/dev/null || true
+          rm -rf Payload release
+          mkdir -p Payload release
+          cp -R "$APP" Payload/
+          zip -0qry "release/$IPA_NAME" Payload
+          unzip -Z1 "release/$IPA_NAME" | grep -q '^Payload/.*\.app/'
+          shasum -a 256 "release/$IPA_NAME" > release/AirCard-V10.4.2-Native-Celosia-TimeOfDay-SHA256.txt
+          ls -lh "release/$IPA_NAME"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCard-iOS-Fluidity-V10.4.2-Native-Celosia-TimeOfDay-IPA
+          path: |
+            release/${{ env.IPA_NAME }}
+            release/AirCard-V10.4.2-Native-Celosia-TimeOfDay-SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="v10.4.2-native-celosia-timeofday"
+          TITLE="AirCard Fluidity V10.4.2 中文版 · Native Celosia TimeOfDay"
+          NOTES="V4 原生 Celosia 路线：保留 MercuryPoster 原始 descriptor/configuration 身份，不再写 fluidity.dynamic、Automatic 或 dynamic，也不再删除/失效 RuntimeSnapshot。刷入 V8 MercuryPoster 容器前，仅把 459C311E… 对应 sourceContents userInfo 的 lookIdentifier 设为 timeOfDay；主屏幕模糊继续使用已验证的 versions/18/supplement 5。Auto NeoSpring 默认关闭。"
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "release/$IPA_NAME" release/AirCard-V10.4.2-Native-Celosia-TimeOfDay-SHA256.txt --clobber --repo "$GH_REPO"
+          else
+            gh release create "$TAG" "release/$IPA_NAME" release/AirCard-V10.4.2-Native-Celosia-TimeOfDay-SHA256.txt --title "$TITLE" --notes "$NOTES" --repo "$GH_REPO"
+          fi
