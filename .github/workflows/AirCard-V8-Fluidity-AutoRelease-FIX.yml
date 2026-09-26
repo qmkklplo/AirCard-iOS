@@ -1,0 +1,149 @@
+name: Build AirCard Fluidity V8
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/AirCard-V8-Fluidity-AutoRelease.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout AirCard-iOS 1.3 source
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/Mak5er/AirCard-iOS.git AirCard-iOS
+          cd AirCard-iOS
+          echo "Source commit: $(git rev-parse HEAD)"
+          grep -q 'MARKETING_VERSION: "1.3"' project.yml || {
+            echo "ERROR: upstream is no longer AirCard 1.3; refusing to patch unknown source."
+            exit 1
+          }
+
+      - name: Apply V8 container passthrough patch
+        working-directory: AirCard-iOS
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("ios-app/TendiesEngine.swift")
+          s = p.read_text()
+
+          marker = '''            log("  🖼 Locating wallpaper descriptors…")
+          '''
+
+          patch = '''            // Fluidity V8: true Nugget-style container passthrough.
+            // Preserve container paths, UUIDs and semantic identifiers.
+            // Safety: refuse any container carrying PosterBoard's SQLite database.
+            let containerStage = tempStageDir.appendingPathComponent("container")
+            if item.isContainer && FileManager.default.fileExists(atPath: containerStage.path) {
+                if item.unsafeContainer {
+                    throw NSError(
+                        domain: "TendiesEngine",
+                        code: 27,
+                        userInfo: [NSLocalizedDescriptionKey: "Unsafe container Tendie refused: PosterBoard SQLite database is present."]
+                    )
+                }
+
+                log("  📦 V8 Container Tendie detected — preserving original paths and identifiers")
+                try await writeDirectoryTree(
+                    sourceBaseDir: containerStage,
+                    targetBaseDir: normalizedContainer,
+                    pairingPath: pairingPath,
+                    log: log
+                )
+                log("  ✅ V8 container tree injected without descriptor UUID/ID randomization")
+                progress(Double(itemIndex + 1) / (totalItems + 1))
+                continue
+            }
+
+          '''
+
+          if "V8 Container Tendie detected" in s:
+              raise SystemExit("ERROR: V8 patch already present unexpectedly")
+          if marker not in s:
+              raise SystemExit("ERROR: AirCard 1.3 TendiesEngine layout changed; patch aborted safely")
+
+          s = s.replace(marker, patch + marker, 1)
+          p.write_text(s)
+          PY
+
+          # Hard assertions: fail rather than silently build stock AirCard.
+          grep -q 'V8 Container Tendie detected' ios-app/TendiesEngine.swift
+          grep -q 'sourceBaseDir: containerStage' ios-app/TendiesEngine.swift
+          grep -q 'targetBaseDir: normalizedContainer' ios-app/TendiesEngine.swift
+          grep -q 'Unsafe container Tendie refused' ios-app/TendiesEngine.swift
+          echo "V8 patch verification passed."
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Ensure AirliftFFI framework exists
+        working-directory: AirCard-iOS
+        run: |
+          set -euo pipefail
+          if [ -d AirliftFFI.xcframework ]; then
+            echo "Using upstream AirliftFFI.xcframework"
+          else
+            echo "AirliftFFI.xcframework missing; rebuilding Rust framework"
+            export DEVELOPER_DIR="$(xcode-select -p)"
+            chmod +x build-ios.sh
+            ./build-ios.sh
+          fi
+
+      - name: Generate Xcode project
+        working-directory: AirCard-iOS
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          test -d AirCard-iOS.xcodeproj
+
+      - name: Build unsigned IPA
+        working-directory: AirCard-iOS
+        run: |
+          set -euo pipefail
+          chmod +x build-ipa.sh
+          ./build-ipa.sh Release
+          test -f build/AirCard-iOS.ipa
+          cp build/AirCard-iOS.ipa build/AirCard-iOS-Fluidity-V8.ipa
+          shasum -a 256 build/AirCard-iOS-Fluidity-V8.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCard-iOS-Fluidity-V8-IPA
+          path: AirCard-iOS/build/AirCard-iOS-Fluidity-V8.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Create or update V8 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="aircard-fluidity-v8"
+          IPA="AirCard-iOS/build/AirCard-iOS-Fluidity-V8.ipa"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$IPA" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$IPA" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "AirCard Fluidity V8" \
+              --notes "AirCard-iOS 1.3 with Fluidity V8 container passthrough."
+          fi
