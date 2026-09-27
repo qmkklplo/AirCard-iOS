@@ -1,0 +1,546 @@
+name: AirCard Fluidity V10.4.5 C901 BlurFix v1s3 NoAutoNeoSpring
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/AirCard-Fluidity-V10.4.5-C901-BlurFix-v1s3-NoAutoNeoSpring.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      IPA_NAME: AirCard-iOS-Fluidity-V10.4.5-C901-BlurFix-v1s3-NoAutoNeoSpring-ZH.ipa
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+
+      - name: Reuse V10.4 base features
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --break-system-packages pyyaml || python3 -m pip install --quiet pyyaml
+
+          python3 <<'PY'
+          from pathlib import Path
+          import yaml
+
+          src = Path('.github/workflows/AirCard-Fluidity-V10.4-iOS18-Dynamic-HomeBlur.yml')
+          if not src.exists():
+              raise SystemExit(f'Base workflow not found: {src}')
+
+          doc = yaml.safe_load(src.read_text())
+          steps = doc['jobs']['build']['steps']
+
+          wanted = 'Integrate V10 features'
+          run = next((s.get('run', '') for s in steps if s.get('name') == wanted), '')
+          if not run:
+              raise SystemExit(f'Base build step not found: {wanted}')
+
+          p = Path('/tmp/aircard-v104-base.sh')
+          p.write_text('set -euo pipefail\n' + run + '\n')
+          print(f'Extracted: {wanted} -> {p}')
+          PY
+
+          bash /tmp/aircard-v104-base.sh
+
+      - name: Integrate C901-only Fluidity Dynamic probe and disable automatic NeoSpring
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          TARGET_UUID = "C90158DC-CC4B-4B6B-B86B-997F87CEF0DA"
+
+          engine = Path("ios-app/TendiesEngine.swift")
+          vm = Path("ios-app/AppViewModel.swift")
+
+          if not engine.exists():
+              raise SystemExit("TendiesEngine.swift not found")
+          if not vm.exists():
+              raise SystemExit("AppViewModel.swift not found")
+
+          e = engine.read_text()
+
+          helper = r'''
+
+              // MARK: - C901 iOS27 Fluidity Dynamic Probe
+
+              private func prepareC901FluidityDynamic(
+                  in mercuryContainerRoot: URL,
+                  log: @escaping (String) -> Void
+              ) {
+                  let fm = FileManager.default
+                  let targetUUID = "C90158DC-CC4B-4B6B-B86B-997F87CEF0DA"
+                  let descriptorName = "com.apple.posterkit.provider.descriptor.identifier"
+                  let userInfoName = "com.apple.posterkit.provider.contents.userInfo"
+
+                  var patchedDescriptor = 0
+                  var patchedUserInfo = 0
+                  var skipped = 0
+
+                  guard let enumerator = fm.enumerator(
+                      at: mercuryContainerRoot,
+                      includingPropertiesForKeys: [.isRegularFileKey],
+                      options: [.skipsHiddenFiles]
+                  ) else {
+                      log("  ⚠️ C901 Dynamic: unable to enumerate MercuryPoster payload")
+                      return
+                  }
+
+                  while let fileURL = enumerator.nextObject() as? URL {
+                      guard fileURL.path.localizedCaseInsensitiveContains(targetUUID) else {
+                          continue
+                      }
+
+                      let name = fileURL.lastPathComponent
+
+                      if name == descriptorName {
+                          do {
+                              try Data("fluidity.dynamic".utf8).write(to: fileURL, options: .atomic)
+                              patchedDescriptor += 1
+                              log("  🧪 C901 descriptor → fluidity.dynamic")
+                          } catch {
+                              skipped += 1
+                              log("  ⚠️ C901 descriptor write failed: \(error.localizedDescription)")
+                          }
+                          continue
+                      }
+
+                      guard name == userInfoName else { continue }
+
+                      guard let data = try? Data(contentsOf: fileURL),
+                            var plist = (try? PropertyListSerialization.propertyList(
+                                from: data,
+                                options: .mutableContainers,
+                                format: nil
+                            )) as? [String: Any] else {
+                          skipped += 1
+                          continue
+                      }
+
+                      let oldLook = plist["lookIdentifier"].map { String(describing: $0) } ?? "<missing>"
+                      let oldAppearance = plist["appearanceMode"].map { String(describing: $0) } ?? "<missing>"
+
+                      plist["appearanceMode"] = "Automatic"
+                      plist["lookIdentifier"] = "dynamic"
+
+                      do {
+                          let out = try PropertyListSerialization.data(
+                              fromPropertyList: plist,
+                              format: .binary,
+                              options: 0
+                          )
+                          try out.write(to: fileURL, options: .atomic)
+                          patchedUserInfo += 1
+                          log("  🧪 C901 userInfo: appearanceMode \(oldAppearance) → Automatic, lookIdentifier \(oldLook) → dynamic")
+                      } catch {
+                          skipped += 1
+                          log("  ⚠️ C901 userInfo write failed: \(error.localizedDescription)")
+                      }
+                  }
+
+                  log("  ✅ C901 Dynamic prepared: descriptor=\(patchedDescriptor), userInfo=\(patchedUserInfo), skipped=\(skipped)")
+
+                  if patchedDescriptor == 0 || patchedUserInfo == 0 {
+                      log("  ⚠️ C901 Dynamic did not find both required files; no other UUID was modified")
+                  }
+              }
+
+          '''
+
+          if "prepareC901FluidityDynamic" not in e:
+              markers = [
+                  "    // MARK: - Plist Identifier Handling\n",
+                  "    // MARK: - Plist Identifier Randomization (Matches Nugget implementation)\n",
+                  "    // MARK: - Folder Injector Helper (Single Atomic Move via AirTraffic)\n",
+              ]
+              marker = next((m for m in markers if m in e), None)
+              if marker is None:
+                  raise SystemExit("C901 helper insertion marker not found")
+              e = e.replace(marker, helper + marker, 1)
+
+          anchor = '                log("  📦 V8 Container Tendie detected — preserving original paths and identifiers")\n'
+          call = '''                let mercuryContainerRootForC901 = containerStage.appendingPathComponent(
+                    "Library/Application Support/PRBPosterExtensionDataStore/61/Extensions/com.apple.MercuryPoster"
+                )
+                if FileManager.default.fileExists(atPath: mercuryContainerRootForC901.path) {
+                    log("  🎯 C901-only probe — preparing Fluidity Dynamic before V8 passthrough")
+                    prepareC901FluidityDynamic(
+                        in: mercuryContainerRootForC901,
+                        log: log
+                    )
+                }
+
+          '''
+
+          if "C901-only probe — preparing Fluidity Dynamic before V8 passthrough" not in e:
+              if anchor not in e:
+                  raise SystemExit("V8 passthrough anchor not found")
+              e = e.replace(anchor, call + anchor, 1)
+
+          engine.write_text(e)
+
+          # Disable automatic NeoSpring after flashing. Manual Respring remains.
+          v = vm.read_text()
+
+          pattern = re.compile(
+              r'(?P<i>[ \t]*)if autoNeoSpringAfterFlash \{\s*'
+              r'tendiesFlashLog\.append\("⚡ V10 Auto NeoSpring is ON — triggering respring\.\.\."\)\s*'
+              r'DispatchQueue\.main\.asyncAfter\(deadline: \.now\(\) \+ 0\.6\) \{ \[weak self\] in\s*'
+              r'self\?\.isNeoSpringing = true\s*'
+              r'RespringHelper\.triggerNeoSpring\(\)\s*'
+              r'\}\s*'
+              r'\} else \{\s*'
+              r'tendiesFlashLog\.append\("🧪 V10 Auto NeoSpring is OFF — complete flash log preserved\. Use manual Respring when ready\."\)\s*'
+              r'\}',
+              re.M
+          )
+
+          m = pattern.search(v)
+          if m:
+              i = m.group("i")
+              replacement = (
+                  i + 'tendiesFlashLog.append("🧪 C901 Probe: automatic NeoSpring is permanently disabled; use manual Respring only if needed.")'
+              )
+              v = v[:m.start()] + replacement + v[m.end():]
+          elif "C901 Probe: automatic NeoSpring is permanently disabled" not in v:
+              raise SystemExit("V10 automatic NeoSpring block not found")
+
+          v = v.replace(
+              'Toggle(isOn: $vm.autoNeoSpringAfterFlash)',
+              'Toggle(isOn: .constant(false))'
+          )
+          v = v.replace(
+              'Text("Auto NeoSpring After Flash")',
+              'Text("自动重启桌面：已禁用")'
+          )
+
+          vm.write_text(v)
+
+          eb = engine.read_text()
+          vb = vm.read_text()
+
+          required_engine = [
+              TARGET_UUID,
+              "prepareC901FluidityDynamic",
+              'Data("fluidity.dynamic".utf8)',
+              'plist["appearanceMode"] = "Automatic"',
+              'plist["lookIdentifier"] = "dynamic"',
+              "C901-only probe — preparing Fluidity Dynamic before V8 passthrough",
+              "V8 Container Tendie detected",
+          ]
+          missing = [x for x in required_engine if x not in eb]
+          if missing:
+              raise SystemExit("C901 integration missing: " + ", ".join(missing))
+
+          if "C901 Probe: automatic NeoSpring is permanently disabled" not in vb:
+              raise SystemExit("No-auto-NeoSpring guard missing")
+
+          if "⚡ V10 Auto NeoSpring is ON — triggering respring..." in vb:
+              raise SystemExit("Automatic NeoSpring trigger path still present")
+
+          print("C901-only Dynamic probe integrated")
+          print("Automatic NeoSpring after flash: DISABLED")
+          PY
+
+      - name: Integrate C901 active-supplement Home Screen Blur fix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          TARGET_UUID = "C90158DC-CC4B-4B6B-B86B-997F87CEF0DA"
+          TARGET_VERSION = "1"
+          TARGET_SUPPLEMENT = "3"
+          BLUR_FILE = "com.apple.posterkit.provider.supplementURL.homescreenConfiguration.plist"
+
+          # Reuse the already verified ON/OFF payload bytes from V10.4. They were
+          # byte-for-byte matched against the iOS 27 native C901 captures.
+          base_workflow = Path('.github/workflows/AirCard-Fluidity-V10.4-iOS18-Dynamic-HomeBlur.yml')
+          if not base_workflow.exists():
+              raise SystemExit(f'Base Blur workflow not found: {base_workflow}')
+          base_text = base_workflow.read_text()
+
+          def extract_b64(name: str) -> str:
+              m = re.search(rf'private static let {name} = "([A-Za-z0-9+/=]+)"', base_text)
+              if not m:
+                  raise SystemExit(f'Unable to extract {name} from V10.4 workflow')
+              return m.group(1)
+
+          blur_on_b64 = extract_b64('fluidityHomeBlurOnB64')
+          blur_off_b64 = extract_b64('fluidityHomeBlurOffB64')
+
+          engine = Path('ios-app/TendiesEngine.swift')
+          vm = Path('ios-app/AppViewModel.swift')
+          view = Path('ios-app/TendiesView.swift')
+          for p in (engine, vm, view):
+              if not p.exists():
+                  raise SystemExit(f'Missing source file: {p}')
+
+          e = engine.read_text()
+
+          helper = f'''
+
+              // MARK: - C901 iOS27 Home Screen Blur Fix (confirmed active v1/s3)
+
+              public func setC901HomeScreenBlurFixed(
+                  enabled: Bool,
+                  containerPath: String,
+                  pairingPath: String,
+                  log: @escaping (String) -> Void
+              ) async throws {{
+                  let configUUID = "{TARGET_UUID}"
+                  let activeVersion = "{TARGET_VERSION}"
+                  let activeSupplement = "{TARGET_SUPPLEMENT}"
+                  let fileName = "{BLUR_FILE}"
+                  let encoded = enabled ? Self.c901BlurOnB64 : Self.c901BlurOffB64
+
+                  guard let plistData = Data(base64Encoded: encoded) else {{
+                      throw NSError(
+                          domain: "TendiesEngine",
+                          code: 1051,
+                          userInfo: [NSLocalizedDescriptionKey: "Embedded C901 Blur plist is invalid."]
+                      )
+                  }}
+
+                  // The payloads are exact native iOS 27 keyed archives. Keep them byte-for-byte.
+                  guard plistData.count > 1000 else {{
+                      throw NSError(
+                          domain: "TendiesEngine",
+                          code: 1052,
+                          userInfo: [NSLocalizedDescriptionKey: "C901 Blur payload validation failed."]
+                      )
+                  }}
+
+                  var normalizedContainer = containerPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                  if normalizedContainer.hasSuffix("/") {{
+                      normalizedContainer = String(normalizedContainer.dropLast())
+                  }}
+                  guard !normalizedContainer.isEmpty else {{
+                      throw NSError(
+                          domain: "TendiesEngine",
+                          code: 1053,
+                          userInfo: [NSLocalizedDescriptionKey: "PosterBoard container path is required."]
+                      )
+                  }}
+
+                  let stageDir = FileManager.default.temporaryDirectory
+                      .appendingPathComponent("c901_blurfix_\\(UUID().uuidString)")
+                  try FileManager.default.createDirectory(at: stageDir, withIntermediateDirectories: true)
+                  defer {{ try? FileManager.default.removeItem(at: stageDir) }}
+
+                  let plistURL = stageDir.appendingPathComponent(fileName)
+                  try plistData.write(to: plistURL, options: .atomic)
+
+                  let targetDir = "\\(normalizedContainer)/Library/Application Support/PRBPosterExtensionDataStore/61/Extensions/com.apple.MercuryPoster/configurations/\\(configUUID)/versions/\\(activeVersion)/supplements/\\(activeSupplement)"
+
+                  log("🌫 C901 BlurFix: \\(enabled ? \"ON\" : \"OFF\")")
+                  log("  🎯 active target: C901 / versions/\\(activeVersion) / supplements/\\(activeSupplement)")
+                  log("  🔒 Fluidity descriptor/userInfo are not touched by this action")
+
+                  try await writeDirectoryTree(
+                      sourceBaseDir: stageDir,
+                      targetBaseDir: targetDir,
+                      pairingPath: pairingPath,
+                      log: log
+                  )
+
+                  log("✅ C901 active supplement Blur plist written successfully")
+                  log("🧪 Automatic NeoSpring is disabled; use manual Respring to refresh if necessary")
+              }}
+
+              private static let c901BlurOnB64 = "{blur_on_b64}"
+              private static let c901BlurOffB64 = "{blur_off_b64}"
+
+          '''
+
+          if 'setC901HomeScreenBlurFixed' not in e:
+              markers = [
+                  '    // MARK: - Send Respring Signal via Tunnel\n',
+                  '    // MARK: - Plist Identifier Handling\n',
+                  '    // MARK: - Folder Injector Helper (Single Atomic Move via AirTraffic)\n',
+              ]
+              marker = next((m for m in markers if m in e), None)
+              if marker is None:
+                  raise SystemExit('C901 BlurFix engine insertion marker not found')
+              e = e.replace(marker, helper + marker, 1)
+              engine.write_text(e)
+
+          v = vm.read_text()
+          state = '\n    @Published var c901HomeScreenBlurEnabled: Bool = UserDefaults.standard.object(forKey: "aircard.v1045.c901_blur") as? Bool ?? true {\n        didSet {\n            UserDefaults.standard.set(c901HomeScreenBlurEnabled, forKey: "aircard.v1045.c901_blur")\n        }\n    }\n    @Published var isApplyingC901BlurFix: Bool = false\n'
+
+          state_anchor = '@Published var isNeoSpringing: Bool = false'
+          if 'c901HomeScreenBlurEnabled' not in v:
+              if state_anchor not in v:
+                  raise SystemExit('AppViewModel state anchor missing')
+              v = v.replace(state_anchor, state_anchor + state, 1)
+
+          func = '    func applyC901BlurFixNow() async {\n        let pairingPath = PairingController.pairingFilePath()\n        guard FileManager.default.fileExists(atPath: pairingPath) else {\n            errorMessage = "没有可用的配对文件，请先在配对页面完成配对。"\n            return\n        }\n\n        var container = posterBoardContainer.trimmingCharacters(in: .whitespacesAndNewlines)\n        if container.isEmpty {\n            do {\n                container = try await TendiesEngine.shared.detectPosterBoardContainer(pairingPath: pairingPath)\n                posterBoardContainer = container\n                UserDefaults.standard.set(container, forKey: "aircard.posterboard_container")\n            } catch {\n                errorMessage = "无法自动找到 PosterBoard 容器：\\(error.localizedDescription)"\n                return\n            }\n        }\n\n        isApplyingC901BlurFix = true\n        tendiesFlashLog.append("🌫 正在应用 C901 主屏幕模糊修复…")\n        defer { isApplyingC901BlurFix = false }\n\n        do {\n            try await TendiesEngine.shared.setC901HomeScreenBlurFixed(\n                enabled: c901HomeScreenBlurEnabled,\n                containerPath: container,\n                pairingPath: pairingPath,\n                log: { [weak self] line in\n                    DispatchQueue.main.async {\n                        self?.tendiesFlashLog.append(line)\n                    }\n                }\n            )\n            tendiesFlashLog.append("✅ C901 BlurFix 写入完成；未自动重启桌面。")\n            tendiesFlashLog.append("🧪 如界面尚未刷新，请使用手动 Respring。")\n        } catch {\n            tendiesFlashLog.append("❌ C901 BlurFix 写入失败：\\(error.localizedDescription)")\n            errorMessage = "C901 BlurFix 写入失败：\\(error.localizedDescription)"\n        }\n    }\n\n'
+
+          if 'func applyC901BlurFixNow() async' not in v:
+              func_anchor = '    func respringDevice() {\n'
+              if func_anchor not in v:
+                  raise SystemExit('respringDevice anchor missing')
+              v = v.replace(func_anchor, func + func_anchor, 1)
+          vm.write_text(v)
+
+          ui = '                // C901 iOS27 BlurFix validation\n                Section {\n                    Toggle(isOn: $vm.c901HomeScreenBlurEnabled) {\n                        VStack(alignment: .leading, spacing: 2) {\n                            Text("C901 主屏幕模糊")\n                                .font(.subheadline.weight(.medium))\n                            Text(vm.c901HomeScreenBlurEnabled ? "写入已验证的 Blur ON" : "写入已验证的 Blur OFF")\n                                .font(.caption2)\n                                .foregroundColor(.secondary)\n                        }\n                    }\n\n                    Button {\n                        Task { await vm.applyC901BlurFixNow() }\n                    } label: {\n                        HStack {\n                            Spacer()\n                            if vm.isApplyingC901BlurFix {\n                                ProgressView()\n                            } else {\n                                Image(systemName: "drop.fill")\n                            }\n                            Text("应用 C901 模糊修复")\n                            Spacer()\n                        }\n                    }\n                    .disabled(vm.isApplyingC901BlurFix)\n                } header: {\n                    Text("iOS 27 · C901 BlurFix")\n                } footer: {\n                    Text("当前实机确认活动路径：C901 / versions/1 / supplements/3。此按钮只覆盖当前 supplement 的 Home Screen 配置，不修改 Fluidity Dynamic，不自动 NeoSpring。")\n                }\n                .tint(.blue)\n\n'
+
+          t = view.read_text()
+          if '应用 C901 模糊修复' not in t:
+              ui_markers = [
+                  '                // Section 3: Wallpapers Gallery\n',
+                  '                // Wallpapers Gallery\n',
+              ]
+              ui_marker = next((m for m in ui_markers if m in t), None)
+              if ui_marker is None:
+                  raise SystemExit('TendiesView BlurFix insertion marker not found')
+              t = t.replace(ui_marker, ui + ui_marker, 1)
+              view.write_text(t)
+
+          # Build-time safety verification.
+          eb = engine.read_text()
+          vb = vm.read_text()
+          tb = view.read_text()
+          required_engine = [
+              TARGET_UUID,
+              'setC901HomeScreenBlurFixed',
+              'activeVersion = "1"',
+              'activeSupplement = "3"',
+              BLUR_FILE,
+              'c901BlurOnB64',
+              'c901BlurOffB64',
+              'Fluidity descriptor/userInfo are not touched by this action',
+          ]
+          missing = [x for x in required_engine if x not in eb]
+          if missing:
+              raise SystemExit('C901 BlurFix engine verification failed: ' + ', '.join(missing))
+
+          if 'applyC901BlurFixNow' not in vb or 'c901HomeScreenBlurEnabled' not in vb:
+              raise SystemExit('C901 BlurFix AppViewModel verification failed')
+          if '应用 C901 模糊修复' not in tb:
+              raise SystemExit('C901 BlurFix UI verification failed')
+
+          # Guard against reintroducing the old broken target inside the new Blur method.
+          method_start = eb.index('public func setC901HomeScreenBlurFixed')
+          method_end = eb.index('private static let c901BlurOnB64', method_start)
+          blur_method = eb[method_start:method_end]
+          forbidden = [
+              '459C311E-3615-4485-A24A-33A10CB3A3ED',
+              '/versions/18/supplements/',
+              'supplementRevision = "5"',
+          ]
+          bad = [x for x in forbidden if x in blur_method]
+          if bad:
+              raise SystemExit('Old broken Blur target leaked into C901 BlurFix: ' + ', '.join(bad))
+
+          print('C901 BlurFix integrated: C901 / v1 / s3')
+          print('Blur payloads: byte-verified native iOS27 ON/OFF data reused')
+          print('Automatic NeoSpring: DISABLED')
+          PY
+
+      - name: Detect project and scheme
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJ="$(find . -name '*.xcodeproj' -print -quit)"
+          test -n "$PROJ"
+          DIR="$(dirname "$PROJ")"
+          NAME="$(basename "$PROJ")"
+          SCHEME="$(cd "$DIR" && xcodebuild -project "$NAME" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("project",{}).get("schemes") or [""])[0])')"
+          test -n "$SCHEME"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "project=$NAME" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+
+      - name: Build V10.4.5
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.xcode.outputs.dir }}"
+          xcodebuild \
+            -project "${{ steps.xcode.outputs.project }}" \
+            -scheme "${{ steps.xcode.outputs.scheme }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/AirCardV1045" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION=10.4.5 \
+            CURRENT_PROJECT_VERSION=1045 \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/AirCardV1045/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 10.4.5" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1045" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName AirCard-C901-BlurFix" "$APP/Info.plist" 2>/dev/null || true
+
+          rm -rf Payload release
+          mkdir -p Payload release
+          cp -R "$APP" Payload/
+
+          zip -0qry "release/$IPA_NAME" Payload
+          unzip -Z1 "release/$IPA_NAME" | grep -q '^Payload/.*\.app/'
+
+          shasum -a 256 "release/$IPA_NAME" > release/AirCard-V10.4.5-C901-BlurFix-v1s3-SHA256.txt
+          ls -lh "release/$IPA_NAME"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCard-iOS-Fluidity-V10.4.5-C901-BlurFix-v1s3-IPA
+          path: |
+            release/${{ env.IPA_NAME }}
+            release/AirCard-V10.4.5-C901-BlurFix-v1s3-SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          TAG="v10.4.5-c901-blurfix-v1s3"
+          TITLE="AirCard Fluidity V10.4.5 · C901 BlurFix v1/s3"
+          NOTES="C901-only iOS 27 BlurFix validation build. Keeps the already verified Fluidity Dynamic logic and adds a standalone Home Screen Blur writer for the currently confirmed active identity C901 / version 1 / supplement 3. Blur ON/OFF payload bytes are reused from the V10.4 implementation and matched byte-for-byte against native iOS 27 captures. The Blur action does not modify descriptor.identifier or contents.userInfo and does not target 3E295FE3 (R2). Automatic NeoSpring remains disabled; use manual Respring only if needed."
+
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload \
+              "$TAG" \
+              "release/$IPA_NAME" \
+              release/AirCard-V10.4.5-C901-BlurFix-v1s3-SHA256.txt \
+              --clobber \
+              --repo "$GH_REPO"
+          else
+            gh release create \
+              "$TAG" \
+              "release/$IPA_NAME" \
+              release/AirCard-V10.4.5-C901-BlurFix-v1s3-SHA256.txt \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --repo "$GH_REPO"
+          fi
