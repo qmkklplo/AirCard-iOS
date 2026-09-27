@@ -1,0 +1,347 @@
+name: AirCard Fluidity V10.4.4 C901 Dynamic NoAutoNeoSpring
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/AirCard-Fluidity-V10.4.4-C901-Dynamic-NoAutoNeoSpring.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      IPA_NAME: AirCard-iOS-Fluidity-V10.4.4-C901-Dynamic-NoAutoNeoSpring-ZH.ipa
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+
+      - name: Reuse V10.4 base features
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --break-system-packages pyyaml || python3 -m pip install --quiet pyyaml
+
+          python3 <<'PY'
+          from pathlib import Path
+          import yaml
+
+          src = Path('.github/workflows/AirCard-Fluidity-V10.4-iOS18-Dynamic-HomeBlur.yml')
+          if not src.exists():
+              raise SystemExit(f'Base workflow not found: {src}')
+
+          doc = yaml.safe_load(src.read_text())
+          steps = doc['jobs']['build']['steps']
+
+          wanted = 'Integrate V10 features'
+          run = next((s.get('run', '') for s in steps if s.get('name') == wanted), '')
+          if not run:
+              raise SystemExit(f'Base build step not found: {wanted}')
+
+          p = Path('/tmp/aircard-v104-base.sh')
+          p.write_text('set -euo pipefail\n' + run + '\n')
+          print(f'Extracted: {wanted} -> {p}')
+          PY
+
+          bash /tmp/aircard-v104-base.sh
+
+      - name: Integrate C901-only Fluidity Dynamic probe and disable automatic NeoSpring
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          TARGET_UUID = "C90158DC-CC4B-4B6B-B86B-997F87CEF0DA"
+
+          engine = Path("ios-app/TendiesEngine.swift")
+          vm = Path("ios-app/AppViewModel.swift")
+
+          if not engine.exists():
+              raise SystemExit("TendiesEngine.swift not found")
+          if not vm.exists():
+              raise SystemExit("AppViewModel.swift not found")
+
+          e = engine.read_text()
+
+          helper = r'''
+
+              // MARK: - C901 iOS27 Fluidity Dynamic Probe
+
+              private func prepareC901FluidityDynamic(
+                  in mercuryContainerRoot: URL,
+                  log: @escaping (String) -> Void
+              ) {
+                  let fm = FileManager.default
+                  let targetUUID = "C90158DC-CC4B-4B6B-B86B-997F87CEF0DA"
+                  let descriptorName = "com.apple.posterkit.provider.descriptor.identifier"
+                  let userInfoName = "com.apple.posterkit.provider.contents.userInfo"
+
+                  var patchedDescriptor = 0
+                  var patchedUserInfo = 0
+                  var skipped = 0
+
+                  guard let enumerator = fm.enumerator(
+                      at: mercuryContainerRoot,
+                      includingPropertiesForKeys: [.isRegularFileKey],
+                      options: [.skipsHiddenFiles]
+                  ) else {
+                      log("  ⚠️ C901 Dynamic: unable to enumerate MercuryPoster payload")
+                      return
+                  }
+
+                  while let fileURL = enumerator.nextObject() as? URL {
+                      guard fileURL.path.localizedCaseInsensitiveContains(targetUUID) else {
+                          continue
+                      }
+
+                      let name = fileURL.lastPathComponent
+
+                      if name == descriptorName {
+                          do {
+                              try Data("fluidity.dynamic".utf8).write(to: fileURL, options: .atomic)
+                              patchedDescriptor += 1
+                              log("  🧪 C901 descriptor → fluidity.dynamic")
+                          } catch {
+                              skipped += 1
+                              log("  ⚠️ C901 descriptor write failed: \(error.localizedDescription)")
+                          }
+                          continue
+                      }
+
+                      guard name == userInfoName else { continue }
+
+                      guard let data = try? Data(contentsOf: fileURL),
+                            var plist = (try? PropertyListSerialization.propertyList(
+                                from: data,
+                                options: .mutableContainers,
+                                format: nil
+                            )) as? [String: Any] else {
+                          skipped += 1
+                          continue
+                      }
+
+                      let oldLook = plist["lookIdentifier"].map { String(describing: $0) } ?? "<missing>"
+                      let oldAppearance = plist["appearanceMode"].map { String(describing: $0) } ?? "<missing>"
+
+                      plist["appearanceMode"] = "Automatic"
+                      plist["lookIdentifier"] = "dynamic"
+
+                      do {
+                          let out = try PropertyListSerialization.data(
+                              fromPropertyList: plist,
+                              format: .binary,
+                              options: 0
+                          )
+                          try out.write(to: fileURL, options: .atomic)
+                          patchedUserInfo += 1
+                          log("  🧪 C901 userInfo: appearanceMode \(oldAppearance) → Automatic, lookIdentifier \(oldLook) → dynamic")
+                      } catch {
+                          skipped += 1
+                          log("  ⚠️ C901 userInfo write failed: \(error.localizedDescription)")
+                      }
+                  }
+
+                  log("  ✅ C901 Dynamic prepared: descriptor=\(patchedDescriptor), userInfo=\(patchedUserInfo), skipped=\(skipped)")
+
+                  if patchedDescriptor == 0 || patchedUserInfo == 0 {
+                      log("  ⚠️ C901 Dynamic did not find both required files; no other UUID was modified")
+                  }
+              }
+
+          '''
+
+          if "prepareC901FluidityDynamic" not in e:
+              markers = [
+                  "    // MARK: - Plist Identifier Handling\n",
+                  "    // MARK: - Plist Identifier Randomization (Matches Nugget implementation)\n",
+                  "    // MARK: - Folder Injector Helper (Single Atomic Move via AirTraffic)\n",
+              ]
+              marker = next((m for m in markers if m in e), None)
+              if marker is None:
+                  raise SystemExit("C901 helper insertion marker not found")
+              e = e.replace(marker, helper + marker, 1)
+
+          anchor = '                log("  📦 V8 Container Tendie detected — preserving original paths and identifiers")\n'
+          call = '''                let mercuryContainerRootForC901 = containerStage.appendingPathComponent(
+                    "Library/Application Support/PRBPosterExtensionDataStore/61/Extensions/com.apple.MercuryPoster"
+                )
+                if FileManager.default.fileExists(atPath: mercuryContainerRootForC901.path) {
+                    log("  🎯 C901-only probe — preparing Fluidity Dynamic before V8 passthrough")
+                    prepareC901FluidityDynamic(
+                        in: mercuryContainerRootForC901,
+                        log: log
+                    )
+                }
+
+          '''
+
+          if "C901-only probe — preparing Fluidity Dynamic before V8 passthrough" not in e:
+              if anchor not in e:
+                  raise SystemExit("V8 passthrough anchor not found")
+              e = e.replace(anchor, call + anchor, 1)
+
+          engine.write_text(e)
+
+          # Disable automatic NeoSpring after flashing. Manual Respring remains.
+          v = vm.read_text()
+
+          pattern = re.compile(
+              r'(?P<i>[ \t]*)if autoNeoSpringAfterFlash \{\s*'
+              r'tendiesFlashLog\.append\("⚡ V10 Auto NeoSpring is ON — triggering respring\.\.\."\)\s*'
+              r'DispatchQueue\.main\.asyncAfter\(deadline: \.now\(\) \+ 0\.6\) \{ \[weak self\] in\s*'
+              r'self\?\.isNeoSpringing = true\s*'
+              r'RespringHelper\.triggerNeoSpring\(\)\s*'
+              r'\}\s*'
+              r'\} else \{\s*'
+              r'tendiesFlashLog\.append\("🧪 V10 Auto NeoSpring is OFF — complete flash log preserved\. Use manual Respring when ready\."\)\s*'
+              r'\}',
+              re.M
+          )
+
+          m = pattern.search(v)
+          if m:
+              i = m.group("i")
+              replacement = (
+                  i + 'tendiesFlashLog.append("🧪 C901 Probe: automatic NeoSpring is permanently disabled; use manual Respring only if needed.")'
+              )
+              v = v[:m.start()] + replacement + v[m.end():]
+          elif "C901 Probe: automatic NeoSpring is permanently disabled" not in v:
+              raise SystemExit("V10 automatic NeoSpring block not found")
+
+          v = v.replace(
+              'Toggle(isOn: $vm.autoNeoSpringAfterFlash)',
+              'Toggle(isOn: .constant(false))'
+          )
+          v = v.replace(
+              'Text("Auto NeoSpring After Flash")',
+              'Text("自动重启桌面：已禁用")'
+          )
+
+          vm.write_text(v)
+
+          eb = engine.read_text()
+          vb = vm.read_text()
+
+          required_engine = [
+              TARGET_UUID,
+              "prepareC901FluidityDynamic",
+              'Data("fluidity.dynamic".utf8)',
+              'plist["appearanceMode"] = "Automatic"',
+              'plist["lookIdentifier"] = "dynamic"',
+              "C901-only probe — preparing Fluidity Dynamic before V8 passthrough",
+              "V8 Container Tendie detected",
+          ]
+          missing = [x for x in required_engine if x not in eb]
+          if missing:
+              raise SystemExit("C901 integration missing: " + ", ".join(missing))
+
+          if "C901 Probe: automatic NeoSpring is permanently disabled" not in vb:
+              raise SystemExit("No-auto-NeoSpring guard missing")
+
+          if "⚡ V10 Auto NeoSpring is ON — triggering respring..." in vb:
+              raise SystemExit("Automatic NeoSpring trigger path still present")
+
+          print("C901-only Dynamic probe integrated")
+          print("Automatic NeoSpring after flash: DISABLED")
+          PY
+
+      - name: Detect project and scheme
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJ="$(find . -name '*.xcodeproj' -print -quit)"
+          test -n "$PROJ"
+          DIR="$(dirname "$PROJ")"
+          NAME="$(basename "$PROJ")"
+          SCHEME="$(cd "$DIR" && xcodebuild -project "$NAME" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("project",{}).get("schemes") or [""])[0])')"
+          test -n "$SCHEME"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "project=$NAME" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+
+      - name: Build V10.4.4
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.xcode.outputs.dir }}"
+          xcodebuild \
+            -project "${{ steps.xcode.outputs.project }}" \
+            -scheme "${{ steps.xcode.outputs.scheme }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/AirCardV1044" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION=10.4.4 \
+            CURRENT_PROJECT_VERSION=1044 \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/AirCardV1044/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 10.4.4" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1044" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName AirCard-C901" "$APP/Info.plist" 2>/dev/null || true
+
+          rm -rf Payload release
+          mkdir -p Payload release
+          cp -R "$APP" Payload/
+
+          zip -0qry "release/$IPA_NAME" Payload
+          unzip -Z1 "release/$IPA_NAME" | grep -q '^Payload/.*\.app/'
+
+          shasum -a 256 "release/$IPA_NAME" > release/AirCard-V10.4.4-C901-Dynamic-NoAutoNeoSpring-SHA256.txt
+          ls -lh "release/$IPA_NAME"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCard-iOS-Fluidity-V10.4.4-C901-Dynamic-NoAutoNeoSpring-IPA
+          path: |
+            release/${{ env.IPA_NAME }}
+            release/AirCard-V10.4.4-C901-Dynamic-NoAutoNeoSpring-SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          TAG="v10.4.4-c901-dynamic-no-auto-neospring"
+          TITLE="AirCard Fluidity V10.4.4 · C901 Dynamic Probe"
+          NOTES="C901-only iOS 27 Fluidity Dynamic validation build. Target UUID: C90158DC-CC4B-4B6B-B86B-997F87CEF0DA. Before V8 container passthrough it changes only matching C901 descriptor.identifier to fluidity.dynamic and matching userInfo to appearanceMode=Automatic / lookIdentifier=dynamic. It does not target 3E295FE3 (R2). Automatic NeoSpring after flashing is permanently disabled in this build; manual Respring remains available."
+
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload \
+              "$TAG" \
+              "release/$IPA_NAME" \
+              release/AirCard-V10.4.4-C901-Dynamic-NoAutoNeoSpring-SHA256.txt \
+              --clobber \
+              --repo "$GH_REPO"
+          else
+            gh release create \
+              "$TAG" \
+              "release/$IPA_NAME" \
+              release/AirCard-V10.4.4-C901-Dynamic-NoAutoNeoSpring-SHA256.txt \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --repo "$GH_REPO"
+          fi
