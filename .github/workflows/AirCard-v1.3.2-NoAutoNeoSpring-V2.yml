@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - ".github/workflows/AirCard-v1.3.2-NoAutoNeoSpring.yml"
+      - ".github/workflows/AirCard-v1.3.2-NoAutoNeoSpring-V2.yml"
 
 permissions:
   contents: write
@@ -17,9 +17,9 @@ jobs:
       UPSTREAM_REPO: https://github.com/Mak5er/AirCard-iOS.git
       UPSTREAM_TAG: v1.3.2
       UPSTREAM_COMMIT: dca390f5d453d78ec710fb2c1e098c4745a67577
-      IPA_NAME: AirCard-iOS-v1.3.2-NoAutoNeoSpring.ipa
-      RELEASE_TAG: aircard-v1.3.2-no-auto-neospring
-      RELEASE_NAME: AirCard-iOS v1.3.2 No Auto NeoSpring
+      IPA_NAME: AirCard-iOS-v1.3.2-NoAutoNeoSpring-Verified.ipa
+      RELEASE_TAG: aircard-v1.3.2-no-auto-neospring-verified
+      RELEASE_NAME: AirCard-iOS v1.3.2 No Auto NeoSpring (Verified ZIP)
 
     steps:
       - name: Clone official AirCard v1.3.2
@@ -146,6 +146,26 @@ jobs:
 
           test -f build/AirCard-iOS.ipa
           mv build/AirCard-iOS.ipa "build/$IPA_NAME"
+
+          echo "==> Verifying IPA ZIP structure..."
+          unzip -t "build/$IPA_NAME"
+
+          python3 <<'PY'
+          import os, zipfile
+          ipa = os.environ["IPA_NAME"]
+          path = os.path.join("build", ipa)
+          with zipfile.ZipFile(path, "r") as z:
+              bad = z.testzip()
+              if bad is not None:
+                  raise SystemExit(f"Corrupt ZIP member: {bad}")
+              names = z.namelist()
+              if not any(n.startswith("Payload/") and n.endswith(".app/Info.plist") for n in names):
+                  raise SystemExit("IPA missing Payload/*.app/Info.plist")
+              if not any(n.startswith("Payload/") and n.endswith(".app/") for n in names):
+                  raise SystemExit("IPA missing Payload/*.app directory")
+              print(f"ZIP OK: {len(names)} entries")
+          PY
+
           shasum -a 256 "build/$IPA_NAME" > "build/$IPA_NAME.sha256"
 
           ls -lh "build/$IPA_NAME" "build/$IPA_NAME.sha256"
@@ -161,7 +181,7 @@ jobs:
           IPA="AirCard-iOS/build/$IPA_NAME"
           SHA="AirCard-iOS/build/$IPA_NAME.sha256"
 
-          NOTES="Official AirCard v1.3.2 with only automatic wallpaper NeoSpring disabled. Manual Respring remains available. No localization or other feature changes."
+          NOTES="Official AirCard v1.3.2 with only automatic wallpaper NeoSpring disabled. Manual Respring remains available. No localization or other feature changes. This build is validated with unzip -t and Python zipfile before release."
 
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "$IPA" "$SHA" --repo "$GITHUB_REPOSITORY" --clobber
