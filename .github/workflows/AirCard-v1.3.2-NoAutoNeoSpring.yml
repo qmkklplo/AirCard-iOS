@@ -1,0 +1,207 @@
+name: Build AirCard v1.3.2 No Auto NeoSpring
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/AirCard-v1.3.2-NoAutoNeoSpring.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    env:
+      UPSTREAM_REPO: https://github.com/Mak5er/AirCard-iOS.git
+      UPSTREAM_TAG: v1.3.2
+      UPSTREAM_COMMIT: dca390f5d453d78ec710fb2c1e098c4745a67577
+      IPA_NAME: AirCard-iOS-v1.3.2-NoAutoNeoSpring.ipa
+      RELEASE_TAG: aircard-v1.3.2-no-auto-neospring
+      RELEASE_NAME: AirCard-iOS v1.3.2 No Auto NeoSpring
+
+    steps:
+      - name: Clone official AirCard v1.3.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --branch "$UPSTREAM_TAG" --depth 1 "$UPSTREAM_REPO" AirCard-iOS
+          cd AirCard-iOS
+
+          ACTUAL_COMMIT="$(git rev-parse HEAD)"
+          echo "Official v1.3.2 commit: $ACTUAL_COMMIT"
+
+          if [ "$ACTUAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
+            echo "ERROR: upstream v1.3.2 commit does not match the verified commit."
+            exit 1
+          fi
+
+      - name: Disable automatic NeoSpring only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd AirCard-iOS
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          vm = Path("ios-app/AppViewModel.swift")
+          tv = Path("ios-app/TendiesView.swift")
+
+          source = vm.read_text()
+
+          old = '''            tendiesFlashPhase = .done(ok: true)
+            tendiesFlashProgress = 1.0
+            tendiesFlashLog.append("🎉 Wallpapers applied successfully!")
+            tendiesFlashLog.append("⚡ Triggering NeoSpring respring...")
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.isNeoSpringing = true
+                RespringHelper.triggerNeoSpring()
+            }
+          '''
+
+          new = '''            tendiesFlashPhase = .done(ok: true)
+            tendiesFlashProgress = 1.0
+            tendiesFlashLog.append("🎉 Wallpapers applied successfully!")
+            tendiesFlashLog.append("ℹ️ Automatic NeoSpring disabled — copy the flash log, then respring manually when ready.")
+          '''
+
+          count = source.count(old)
+          if count != 1:
+              raise SystemExit(f"Expected one automatic NeoSpring block, found {count}. Refusing to patch.")
+
+          vm.write_text(source.replace(old, new, 1))
+
+          ui = tv.read_text()
+          old_footer = 'Text("Flashing will automatically trigger NeoSpring to respring the device and apply your new wallpapers.")'
+          new_footer = 'Text("Automatic NeoSpring is disabled. Copy the flash log first, then use Respring manually when ready.")'
+
+          count = ui.count(old_footer)
+          if count != 1:
+              raise SystemExit(f"Expected one automatic NeoSpring footer, found {count}. Refusing to patch.")
+
+          tv.write_text(ui.replace(old_footer, new_footer, 1))
+          PY
+
+      - name: Verify only the requested change
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd AirCard-iOS
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          vm = Path("ios-app/AppViewModel.swift").read_text()
+          tv = Path("ios-app/TendiesView.swift").read_text()
+
+          flash_start = vm.index("    func flashSelectedTendies() async {")
+          manual_start = vm.index("    func respringDevice() {", flash_start)
+          reset_start = vm.index("    func reset()", manual_start)
+
+          flash = vm[flash_start:manual_start]
+          manual = vm[manual_start:reset_start]
+
+          if "RespringHelper.triggerNeoSpring()" in flash:
+              raise SystemExit("Automatic NeoSpring still exists in flashSelectedTendies().")
+
+          if "Triggering NeoSpring respring..." in flash:
+              raise SystemExit("Automatic NeoSpring log still exists in flashSelectedTendies().")
+
+          if "Automatic NeoSpring disabled" not in flash:
+              raise SystemExit("Diagnostic completion log is missing.")
+
+          if "RespringHelper.triggerNeoSpring()" not in manual:
+              raise SystemExit("Manual respringDevice() was accidentally removed.")
+
+          if 'Text("Respring (NeoSpring)")' not in tv:
+              raise SystemExit("Manual Respring button was accidentally removed.")
+
+          if "RespringHelper.triggerNeoSpring()" not in tv:
+              raise SystemExit("Manual Respring button action was accidentally removed.")
+
+          if "Flashing will automatically trigger NeoSpring" in tv:
+              raise SystemExit("Old misleading footer still exists.")
+
+          print("Verified: automatic NeoSpring OFF; manual NeoSpring retained.")
+          PY
+
+          CHANGED="$(git diff --name-only)"
+          echo "Changed files:"
+          printf '%s\n' "$CHANGED"
+
+          COUNT="$(printf '%s\n' "$CHANGED" | sed '/^$/d' | wc -l | tr -d ' ')"
+          test "$COUNT" = "2"
+          printf '%s\n' "$CHANGED" | grep -qx 'ios-app/AppViewModel.swift'
+          printf '%s\n' "$CHANGED" | grep -qx 'ios-app/TendiesView.swift'
+
+          echo
+          echo "Patch diff:"
+          git --no-pager diff -- ios-app/AppViewModel.swift ios-app/TendiesView.swift
+
+      - name: Build unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd AirCard-iOS
+
+          chmod +x build-ipa.sh
+          ./build-ipa.sh Release
+
+          test -f build/AirCard-iOS.ipa
+          mv build/AirCard-iOS.ipa "build/$IPA_NAME"
+
+          shasum -a 256 "build/$IPA_NAME" > "build/$IPA_NAME.sha256"
+
+          echo
+          echo "Built:"
+          ls -lh "build/$IPA_NAME" "build/$IPA_NAME.sha256"
+          cat "build/$IPA_NAME.sha256"
+
+      - name: Publish IPA to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          IPA="AirCard-iOS/build/$IPA_NAME"
+          SHA="AirCard-iOS/build/$IPA_NAME.sha256"
+
+          NOTES="$(cat <<'EOF'
+          Based exactly on official Mak5er/AirCard-iOS v1.3.2.
+
+          Only change:
+          - Wallpaper flashing no longer triggers NeoSpring automatically.
+          - Manual "Respring (NeoSpring)" remains available.
+          - The wallpaper footer/log are updated only to describe the new behavior.
+
+          No localization. No Fluidity-specific patches. No other feature changes.
+          Unsigned IPA.
+          EOF
+          )"
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$IPA" "$SHA" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$RELEASE_NAME" \
+              --notes "$NOTES"
+          else
+            gh release create "$RELEASE_TAG" "$IPA" "$SHA" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$RELEASE_NAME" \
+              --notes "$NOTES"
+          fi
+
+          echo
+          echo "Release ready:"
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json url \
+            --jq .url
