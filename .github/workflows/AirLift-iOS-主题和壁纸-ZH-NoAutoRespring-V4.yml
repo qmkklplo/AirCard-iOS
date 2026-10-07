@@ -1,0 +1,289 @@
+name: AirLift-iOS 主题和壁纸 中文版
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      IPA_NAME: AirLift-iOS-主题和壁纸-ZH-V4.ipa
+
+    steps:
+      - name: Checkout AirCard-iOS v1.3.2
+        uses: actions/checkout@v5
+        with:
+          repository: Mak5er/AirCard-iOS
+          ref: v1.3.2
+          path: AirCard-iOS
+          fetch-depth: 1
+
+      - name: Apply requested modifications
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd AirCard-iOS
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          cv = Path("ios-app/ContentView.swift")
+          tv = Path("ios-app/TendiesView.swift")
+          vm = Path("ios-app/AppViewModel.swift")
+          info = Path("ios-app/Info.plist")
+
+          # 1) Disable automatic NeoSpring after wallpaper flash.
+          s = vm.read_text()
+          pat = re.compile(
+              r'(?P<i>[ \t]*)tendiesFlashLog\.append\("🎉 Wallpapers applied successfully!"\)\s*'
+              r'tendiesFlashLog\.append\("⚡ Triggering NeoSpring respring\.\.\."\)\s*'
+              r'DispatchQueue\.main\.asyncAfter\(deadline: \.now\(\) \+ 0\.6\) \{ \[weak self\] in\s*'
+              r'self\?\.isNeoSpringing = true\s*RespringHelper\.triggerNeoSpring\(\)\s*\}', re.M)
+          m = pat.search(s)
+          if not m:
+              raise SystemExit("Automatic NeoSpring block not found")
+          s = s[:m.start()] + m.group("i") + 'tendiesFlashLog.append("🎉 壁纸应用成功！")' + s[m.end():]
+          vm.write_text(s)
+
+          # 2) Delete automatic-respring description; manual Respring remains.
+          t = tv.read_text()
+          footer = 'Text("Flashing will automatically trigger NeoSpring to respring the device and apply your new wallpapers.")'
+          if footer not in t:
+              raise SystemExit("NeoSpring footer not found")
+          t = t.replace(footer, 'EmptyView()', 1)
+          tv.write_text(t)
+
+          # 3) Remove donation/startup-support UI.
+          c = cv.read_text()
+
+          # Replace complete CreditsSheet with a credits-only sheet.
+          a = c.find("struct CreditsSheet: View {")
+          b = c.find("// MARK:", a + 10)
+          if a < 0 or b < 0:
+              raise SystemExit("CreditsSheet boundaries not found")
+          credits = '''struct CreditsSheet: View {
+              @Environment(\\.dismiss) private var dismiss
+
+              var body: some View {
+                  NavigationStack {
+                      List {
+                          Section("能力地图") {
+                              Label("PosterBoard 壁纸：已验证可写", systemImage: "checkmark.circle.fill")
+                              Label("密码盘主题：已验证可写", systemImage: "checkmark.circle.fill")
+                              Label("Wallet 卡面资源：已验证可写", systemImage: "checkmark.circle.fill")
+                              Label("App 数据容器：可定位；写入取决于目标", systemImage: "scope")
+                              Label("SpringBoard 配置：仅部分目标可验证", systemImage: "exclamationmark.triangle")
+                              Label("MobileGestalt / iPad 模式：当前链路不支持", systemImage: "xmark.circle")
+                              Label("运行时代码注入 / Hook：当前链路不支持", systemImage: "xmark.circle")
+                          }
+
+                          Section("说明") {
+                              Text("这里只显示当前 AirLift/AirTraffic 链路已有依据的能力，不把“知道路径或 Key”误标成“可修改”。")
+                              Text("V4 不会为了探测权限而覆盖系统文件；未知目标保持“未验证”，避免破坏系统状态。")
+                                  .font(.caption)
+                                  .foregroundStyle(.secondary)
+                          }
+
+                          Section("致谢") {
+                              Text("AirLift-iOS 主题和壁纸").font(.headline)
+                              Text("基于 AirCard-iOS v1.3.2").font(.caption).foregroundStyle(.secondary)
+                              Text("Mak5er — AirCard-iOS 开发")
+                              Text("merybist — 初始基础移植")
+                              Text("AirLift by 0xjohnny — AirTraffic / ATAirlock 沙盒逃逸研究")
+                              Text("NeoSpring — 手动桌面重载实现")
+                          }
+                      }
+                      .navigationTitle("权限与能力")
+                      .navigationBarTitleDisplayMode(.inline)
+                      .toolbar {
+                          ToolbarItem(placement: .navigationBarTrailing) {
+                              Button("完成") { dismiss() }
+                          }
+                      }
+                  }
+              }
+          }
+
+          '''
+          c = c[:a] + credits + c[b:]
+
+          # Remove donation helper views and startup support popup declarations.
+          for begin, end in [
+              ("struct CryptoDonationRow: View {", "// MARK: - Donate View"),
+              ("struct DonateView: View {", "// MARK: - Support Popup Sheet"),
+              ("struct SupportPopupSheet: View {", "// MARK: - Credits Sheet"),
+          ]:
+              a = c.find(begin)
+              if a >= 0:
+                  b = c.find(end, a)
+                  if b < 0:
+                      raise SystemExit("Could not safely remove " + begin)
+                  c = c[:a] + c[b:]
+
+          # Remove startup popup state and presentation/trigger.
+          c = re.sub(r'\n\s*@AppStorage\("aircard\.dont_show_support_on_launch"\)[^\n]*', '', c)
+          c = re.sub(r'\n\s*@State private var showSupportPopup: Bool = false', '', c)
+          c = re.sub(r'\n\s*\.sheet\(isPresented: \$showSupportPopup\)\s*\{\s*SupportPopupSheet\([^}]+\}', '', c, flags=re.S)
+          c = re.sub(
+              r'\n\s*if !dontShowSupportOnLaunch\s*\{\s*DispatchQueue\.main\.asyncAfter\([^}]+\}\s*\}',
+              '', c, flags=re.S)
+
+          # Rename any remaining credits buttons; no donation wording.
+          c = c.replace('"Credits & Donate"', '"权限与能力"')
+          c = c.replace('Label("Credits & Donate", systemImage: "heart.fill")',
+                        'Label("权限与能力", systemImage: "checklist")')
+
+          cv.write_text(c)
+
+          # 4) Chinese UI strings (same source-based localization approach used for the Chinese build).
+          zh = {
+              "Pairing":"配对","Wallet Cards":"钱包卡片","Passcode":"密码盘","Wallpapers":"壁纸",
+              "Credits":"致谢","Network":"网络","Active Pairing":"当前配对",
+              "Pair on This iPhone":"在此 iPhone 上配对","Not Paired":"未配对",
+              "Pair This iPhone":"配对此 iPhone","Re-Pair This iPhone":"重新配对此 iPhone",
+              "Cancel Pairing":"取消配对","Delete Pairing":"删除配对","Import Pairing File":"导入配对文件",
+              "Scan Cards":"扫描卡片","Stop Scan":"停止扫描","No Cards Detected Yet":"尚未检测到卡片",
+              "Add Manually":"手动添加","Add Card Manually":"手动添加卡片","Add Card":"添加卡片",
+              "Clear All Cards":"清空所有卡片","Passcode Theme":"密码盘主题","Passcode Themes":"密码盘主题",
+              "Create Theme":"制作主题","Browse Files":"浏览文件","Choose .passthm from Files…":"从文件选择 .passthm…",
+              "Change .passthm…":"更换 .passthm…","Theme Information":"主题信息","Files in theme":"主题内文件数",
+              "Edit in Theme Creator":"在主题制作器中编辑","Remove / Unload Theme":"移除 / 卸载主题",
+              "Flash Theme to iPhone":"刷入主题到本机","Flashing Theme…":"正在刷入主题…",
+              "Retry Flash Theme":"重试刷入主题","Interactive Lock Screen Preview":"锁屏交互预览",
+              "Choose Image Source":"选择图片来源","Choose Poster Image Source":"选择海报图来源",
+              "Photo Library":"照片图库","Choose from Files…":"从文件中选择…","Suggested Photos":"推荐照片",
+              "Poster Image":"海报图","Preview":"预览","Zoom & Framing":"缩放与构图","Slicing Style":"切图方式",
+              "Circle Buttons":"圆形按键","Seamless Poster":"无缝海报","Individual Keys":"单个按键",
+              "Drag preview to reposition":"拖动预览可调整位置","Reset Position":"重置位置",
+              "Tap to choose photo":"点击选择图片","Export .passthm...":"导出 .passthm…",
+              "System Language":"系统语言","All Languages (Universal)":"所有语言（通用）",
+              "Regular Font Only (Fast)":"仅常规字体（快速）","Bold Text Only (Fast)":"仅粗体（快速）",
+              "Wallpapers Gallery":"壁纸库","Import More Wallpapers…":"导入更多壁纸…",
+              "Choose .tendies from Files…":"从文件选择 .tendies…",
+              "PosterBoard container will be auto-detected automatically on flash.":"刷入时将自动检测 PosterBoard 容器。",
+              "Force PosterBoard Cache Refresh":"强制刷新 PosterBoard 缓存",
+              "Resets file protections so iOS re-indexes wallpapers immediately":"重置文件保护，使 iOS 重新索引壁纸",
+              "Deselect All":"取消全选","Select All":"全选","No .tendies wallpapers loaded yet":"尚未载入 .tendies 壁纸",
+              "Flashing Wallpapers…":"正在刷入壁纸…","Respring (NeoSpring)":"重启桌面",
+              "App Container":"App 容器","Descriptor Archive":"描述项归档","Descriptors":"描述项",
+              "Target Extension":"目标扩展","Format":"格式","Name":"名称","Type":"类型","Information":"信息",
+              "Close":"关闭","Done":"完成","Cancel":"取消","Delete":"删除","Clear":"清除","Clear All":"全部清除",
+              "Error":"错误","Warning":"警告","Notice":"提示","Retry":"重试","Load":"载入","Copy":"复制",
+              "Copied!":"已复制！","Stop":"停止","Add":"添加",
+              "Target: PosterBoard container detected ✅":"目标：已检测到 PosterBoard 容器 ✅"
+          }
+          for p in Path("ios-app").rglob("*.swift"):
+              x = p.read_text(errors="ignore")
+              for en, cn in zh.items():
+                  x = x.replace('"' + en + '"', '"' + cn + '"')
+              x = x.replace(
+                  'Text("Flash \\(selectedCount) Wallpaper\\(selectedCount == 1 ? "" : "s")")',
+                  'Text("刷入 \\(selectedCount) 张壁纸")')
+              x = re.sub(r'"\\\(([^"]+)\) Wallpapers Imported"', r'"已导入 \(\1) 张壁纸"', x)
+              p.write_text(x)
+
+          # 5) Branding.
+          x = info.read_text()
+          x = x.replace("<string>AirCard-iOS</string>", "<string>AirLift-iOS 主题和壁纸</string>", 1)
+          info.write_text(x)
+          for p in Path("ios-app").rglob("*.swift"):
+              x = p.read_text(errors="ignore").replace('"AirCard-iOS"', '"AirLift-iOS 主题和壁纸"')
+              p.write_text(x)
+
+          # Hard verification.
+          allsrc = "\n".join(p.read_text(errors="ignore") for p in Path("ios-app").rglob("*.swift"))
+          # Donation strings must be gone globally. Do NOT reject generic NeoSpring
+          # strings here: the manual Respring action intentionally remains.
+          bad = ["paypal.com/donate","Donate with PayPal","USDT (TRC20)","BEP20 (BNB / USDT)",
+                 "TON (The Open Network)","Donate & Support"]
+          left = [x for x in bad if x in allsrc]
+          if left:
+              raise SystemExit("Verification failed: " + ", ".join(left))
+
+          # Verify only the wallpaper-flash SUCCESS path: it must not schedule or
+          # call NeoSpring after the success message. The separate manual action
+          # is allowed (and required) to keep RespringHelper.triggerNeoSpring().
+          vm_after = vm.read_text()
+          success_pos = vm_after.find('tendiesFlashLog.append("🎉 壁纸应用成功！")')
+          if success_pos < 0:
+              raise SystemExit("Wallpaper success marker verification failed")
+          tail = vm_after[success_pos:success_pos + 700]
+          if 'DispatchQueue.main.asyncAfter(deadline: .now() + 0.6)' in tail or 'RespringHelper.triggerNeoSpring()' in tail:
+              raise SystemExit("Automatic NeoSpring still exists in wallpaper success path")
+
+          # Manual NeoSpring is implemented outside TendiesView in upstream v1.3.2.
+          # Verify the visible manual control instead of requiring the helper call
+          # to live in TendiesView.swift.
+          tendies_ui = tv.read_text()
+          manual_labels = [
+              'Text("重启桌面")',
+              'Text("Respring (NeoSpring)")',
+              '"重启桌面"',
+              '"Respring (NeoSpring)"'
+          ]
+          if not any(label in tendies_ui for label in manual_labels):
+              raise SystemExit("Manual Respring UI verification failed")
+          if "MobileGestalt / iPad 模式：当前链路不支持" not in cv.read_text():
+              raise SystemExit("V4 capability map verification failed")
+          print("Verified V4: capability map present; auto NeoSpring removed; manual Respring UI kept; donation UI removed.")
+          PY
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd AirCard-iOS
+          xcodegen generate
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd AirCard-iOS
+          xcodebuild -project AirCard-iOS.xcodeproj -scheme AirCard-iOS \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/AirLiftThemeWallpaper" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION=1.3.2 CURRENT_PROJECT_VERSION=132 \
+            COMPILER_INDEX_STORE_ENABLE=NO build
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/AirLiftThemeWallpaper/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName AirLift-iOS 主题和壁纸" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName AirLift-iOS" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.3.2" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 132" "$APP/Info.plist"
+
+          rm -rf "$GITHUB_WORKSPACE/release" "$RUNNER_TEMP/ipa-stage"
+          mkdir -p "$GITHUB_WORKSPACE/release" "$RUNNER_TEMP/ipa-stage/Payload"
+          ditto "$APP" "$RUNNER_TEMP/ipa-stage/Payload/$(basename "$APP")"
+          (cd "$RUNNER_TEMP/ipa-stage" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/release/$IPA_NAME" Payload)
+          /usr/bin/unzip -t "$GITHUB_WORKSPACE/release/$IPA_NAME"
+          shasum -a 256 "$GITHUB_WORKSPACE/release/$IPA_NAME" > "$GITHUB_WORKSPACE/release/AirLift-iOS-主题和壁纸-ZH-SHA256.txt"
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="airlift-ios-theme-wallpaper-1.3.2-zh-v4"
+          TITLE="AirLift-iOS 主题和壁纸 · V4 权限地图"
+          NOTES="V4：在 V3 基础上加入权限与能力地图；明确区分已验证可写、条件性能力与当前链路不支持项；不加入无效 iPad 模式开关；不进行破坏性权限探测。继续保留中文界面、无自动 NeoSpring、手动重启桌面及无捐赠入口。"
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "release/$IPA_NAME" "release/AirLift-iOS-主题和壁纸-ZH-SHA256.txt" --clobber --repo "$GH_REPO"
+          else
+            gh release create "$TAG" "release/$IPA_NAME" "release/AirLift-iOS-主题和壁纸-ZH-SHA256.txt" \
+              --title "$TITLE" --notes "$NOTES" --repo "$GH_REPO"
+          fi
