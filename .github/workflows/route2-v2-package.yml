@@ -79,7 +79,7 @@ jobs:
 
       - name: Publish V2 release
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           TAG="route2-v2-extractor-20261008"
