@@ -1,0 +1,106 @@
+name: Package Route 2 V2 Extractor
+
+on:
+  push:
+    branches:
+      - route2-v2-extractor-20261008
+    paths:
+      - "route2-v2/**"
+      - ".github/workflows/route2-v2-package.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Verify Python syntax
+        run: |
+          set -euo pipefail
+          python3 -m py_compile route2-v2/route2_v2_extract.py
+
+      - name: Verify safety invariants
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("route2-v2/route2_v2_extract.py").read_text(encoding="utf-8")
+          required = [
+              "Mobilebackup2Service",
+              "backup_client.backup(",
+              "0AEA1C8E-3EA7-4E6E-81E4-511972087A54",
+              "769BEBC4-9C5E-4A57-84C6-939C9C90C521",
+              "C90158DC-CC4B-4B6B-B86B-997F87CEF0DA",
+              "Core7Candidates",
+          ]
+          missing = [x for x in required if x not in p]
+          if missing:
+              raise SystemExit("Missing required V2 markers: " + ", ".join(missing))
+
+          forbidden_calls = [
+              "backup_client.restore(",
+              ".restore(",
+              "start_restore(",
+              "restore_device",
+          ]
+          found = [x for x in forbidden_calls if x in p]
+          if found:
+              raise SystemExit("Unsafe restore/write marker found: " + ", ".join(found))
+
+          print("Safety verification passed: read-only extraction path only.")
+          PY
+
+      - name: Package ZIP
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/package
+          cp route2-v2/RUN-Route2-V2.bat dist/package/
+          cp route2-v2/route2_v2_extract.py dist/package/
+          cp route2-v2/requirements.txt dist/package/
+          cp route2-v2/README.txt dist/package/
+
+          (
+            cd dist/package
+            zip -9 -r ../Route2-Mercury-Configuration-Extractor-V2.zip .
+          )
+
+          cd dist
+          sha256sum Route2-Mercury-Configuration-Extractor-V2.zip > Route2-Mercury-Configuration-Extractor-V2-SHA256.txt
+          unzip -t Route2-Mercury-Configuration-Extractor-V2.zip
+          ls -lh Route2-Mercury-Configuration-Extractor-V2.zip
+          cat Route2-Mercury-Configuration-Extractor-V2-SHA256.txt
+
+      - name: Publish V2 release
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="route2-v2-extractor-20261008"
+          TITLE="Route 2 Mercury Configuration Extractor V2"
+          ZIP="dist/Route2-Mercury-Configuration-Extractor-V2.zip"
+          SHA="dist/Route2-Mercury-Configuration-Extractor-V2-SHA256.txt"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" "$SHA" --clobber
+          else
+            gh release create "$TAG" "$ZIP" "$SHA" \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --notes "Read-only V2 extractor. Targets the confirmed iOS 27 Mercury configuration candidates 0AEA... and 769B..., excludes the modified C901 configuration, and exports full configuration payloads plus byte-for-byte Core-7 candidate files. No restore/rebuild/write-back path is present."
+          fi
+
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Route2-Mercury-Configuration-Extractor-V2
+          path: |
+            dist/Route2-Mercury-Configuration-Extractor-V2.zip
+            dist/Route2-Mercury-Configuration-Extractor-V2-SHA256.txt
+          if-no-files-found: error
